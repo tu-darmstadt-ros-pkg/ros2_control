@@ -655,23 +655,46 @@ void ControllerManager::init_controller_manager()
   }
   else
   {
-    robot_description_notification_timer_ = create_wall_timer(
-      std::chrono::seconds(1),
-      [&]()
+    // Check if robot_description is available as a parameter before subscribing to the topic
+    if (this->has_parameter("robot_description"))
+    {
+      robot_description_ = this->get_parameter("robot_description").as_string();
+      if (!robot_description_.empty())
       {
-        RCLCPP_WARN(
-          get_logger(), "Waiting for data on 'robot_description' topic to finish initialization");
-      });
-  }
+        RCLCPP_INFO(get_logger(), "Received robot description from parameter.");
+        init_resource_manager(robot_description_);
+        if (is_resource_manager_initialized())
+        {
+          RCLCPP_INFO(
+            get_logger(),
+            "Resource Manager has been successfully initialized from parameter. "
+            "Starting Controller Manager services...");
+          init_services();
+        }
+      }
+    }
 
-  // set QoS to transient local to get messages that have already been published
-  // (if robot state publisher starts before controller manager)
-  robot_description_subscription_ = create_subscription<std_msgs::msg::String>(
-    "robot_description", rclcpp::QoS(1).transient_local(),
-    std::bind(&ControllerManager::robot_description_callback, this, std::placeholders::_1));
-  RCLCPP_INFO(
-    get_logger(), "Subscribing to '%s' topic for robot description.",
-    robot_description_subscription_->get_topic_name());
+    if (!is_resource_manager_initialized())
+    {
+      robot_description_notification_timer_ = create_wall_timer(
+        std::chrono::seconds(1),
+        [&]()
+        {
+          RCLCPP_WARN(
+            get_logger(),
+            "Waiting for data on 'robot_description' topic to finish initialization");
+        });
+
+      // set QoS to transient local to get messages that have already been published
+      // (if robot state publisher starts before controller manager)
+      robot_description_subscription_ = create_subscription<std_msgs::msg::String>(
+        "robot_description", rclcpp::QoS(1).transient_local(),
+        std::bind(&ControllerManager::robot_description_callback, this, std::placeholders::_1));
+      RCLCPP_INFO(
+        get_logger(), "Subscribing to '%s' topic for robot description.",
+        robot_description_subscription_->get_topic_name());
+    }
+  }
 
   // Setup diagnostics
   periodicity_stats_.reset();
