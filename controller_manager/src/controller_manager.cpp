@@ -4828,17 +4828,6 @@ rclcpp::NodeOptions ControllerManager::determine_controller_node_options(
     node_options_arguments.push_back("use_sim_time:=true");
   }
 
-  // Forward robot_description_semantic (SRDF) to controllers if available
-  if (!robot_description_semantic_.empty())
-  {
-    if (!check_for_element(node_options_arguments, RCL_ROS_ARGS_FLAG))
-    {
-      node_options_arguments.push_back(RCL_ROS_ARGS_FLAG);
-    }
-    node_options_arguments.push_back(RCL_PARAM_FLAG);
-    node_options_arguments.push_back("robot_description_semantic:=" + robot_description_semantic_);
-  }
-
   // Add options parsed through the spawner
   if (
     !controller.info.node_options_args.empty() &&
@@ -4853,22 +4842,8 @@ rclcpp::NodeOptions ControllerManager::determine_controller_node_options(
 
   std::string arguments;
   arguments.reserve(1000);
-  for (size_t i = 0; i < node_options_arguments.size(); ++i)
+  for (const auto & arg : node_options_arguments)
   {
-    const auto & arg = node_options_arguments[i];
-    // Suppress large robot description strings from the log
-    if (arg.find("robot_description") != std::string::npos)
-    {
-      continue;
-    }
-    // Also skip --param flags that precede a robot_description argument
-    if (
-      (arg == RCL_PARAM_FLAG || arg == RCL_SHORT_PARAM_FLAG) &&
-      i + 1 < node_options_arguments.size() &&
-      node_options_arguments[i + 1].find("robot_description") != std::string::npos)
-    {
-      continue;
-    }
     arguments.append(arg);
     arguments.append(" ");
   }
@@ -4878,6 +4853,15 @@ rclcpp::NodeOptions ControllerManager::determine_controller_node_options(
 
   controller_node_options = controller_node_options.arguments(node_options_arguments);
   controller_node_options.use_global_arguments(false);
+
+  // Forward robot_description_semantic (SRDF) to controllers if available.
+  // Uses parameter_overrides instead of --param to avoid XML parsing issues with CLI args.
+  if (!robot_description_semantic_.empty())
+  {
+    controller_node_options.append_parameter_override(
+      "robot_description_semantic", robot_description_semantic_);
+  }
+
   return controller_node_options;
 }
 
