@@ -658,7 +658,8 @@ void ControllerManager::init_controller_manager()
   START_ROS2_CONTROL_INTROSPECTION_PUBLISHER_THREAD(hardware_interface::CM_STATISTICS_KEY);
 
   // Read robot_description_semantic (SRDF) if available as a parameter.
-  // This is forwarded to controllers via --param in determine_controller_node_options().
+  // This is forwarded to controllers via parameter_overrides in
+  // determine_controller_node_options().
   if (this->has_parameter("robot_description_semantic"))
   {
     robot_description_semantic_ = this->get_parameter("robot_description_semantic").as_string();
@@ -666,6 +667,13 @@ void ControllerManager::init_controller_manager()
     {
       RCLCPP_INFO(get_logger(), "Loaded robot_description_semantic (SRDF) from parameter.");
     }
+  }
+  else
+  {
+    RCLCPP_INFO(
+      get_logger(),
+      "robot_description_semantic parameter not available on controller manager. "
+      "Controllers will need to load it themselves.");
   }
 
   // Get parameters needed for RT "update" loop to work
