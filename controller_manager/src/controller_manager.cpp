@@ -637,42 +637,6 @@ void ControllerManager::init_controller_manager()
   resource_manager_->set_on_component_state_switch_callback(
     std::bind(&ControllerManager::publish_activity, this));
 
-  // Get parameters needed for RT "update" loop to work
-  if (is_resource_manager_initialized())
-  {
-    if (params_->enforce_command_limits)
-    {
-      resource_manager_->import_joint_limiters(robot_description_);
-      RCLCPP_INFO(get_logger(), "Enforcing command limits is enabled...");
-    }
-    else
-    {
-      RCLCPP_INFO(
-        get_logger(),
-        "Enforcing command limits is disabled. Command limits from URDF will be ignored.");
-    }
-    init_services();
-  }
-  else
-  {
-    robot_description_notification_timer_ = create_wall_timer(
-      std::chrono::seconds(1),
-      [&]()
-      {
-        RCLCPP_WARN(
-          get_logger(), "Waiting for data on 'robot_description' topic to finish initialization");
-      });
-  }
-
-  // set QoS to transient local to get messages that have already been published
-  // (if robot state publisher starts before controller manager)
-  robot_description_subscription_ = create_subscription<std_msgs::msg::String>(
-    "robot_description", rclcpp::QoS(1).transient_local(),
-    std::bind(&ControllerManager::robot_description_callback, this, std::placeholders::_1));
-  RCLCPP_INFO(
-    get_logger(), "Subscribing to '%s' topic for robot description.",
-    robot_description_subscription_->get_topic_name());
-
   // Setup diagnostics
   periodicity_stats_.reset();
   diagnostics_updater_.setHardwareID("ros2_control");
@@ -692,6 +656,83 @@ void ControllerManager::init_controller_manager()
   INITIALIZE_ROS2_CONTROL_INTROSPECTION_REGISTRY(
     this, hardware_interface::CM_STATISTICS_TOPIC, hardware_interface::CM_STATISTICS_KEY);
   START_ROS2_CONTROL_INTROSPECTION_PUBLISHER_THREAD(hardware_interface::CM_STATISTICS_KEY);
+
+  // Read robot_description_semantic (SRDF) if available as a parameter.
+  // This is forwarded to controllers via parameter_overrides in
+  // determine_controller_node_options().
+  if (this->has_parameter("robot_description_semantic"))
+  {
+    robot_description_semantic_ = this->get_parameter("robot_description_semantic").as_string();
+    if (!robot_description_semantic_.empty())
+    {
+      RCLCPP_INFO(get_logger(), "Loaded robot_description_semantic (SRDF) from parameter.");
+    }
+  }
+  else
+  {
+    RCLCPP_INFO(
+      get_logger(),
+      "robot_description_semantic parameter not available on controller manager. "
+      "Controllers will need to load it themselves.");
+  }
+
+  // Get parameters needed for RT "update" loop to work
+  if (is_resource_manager_initialized())
+  {
+    if (params_->enforce_command_limits)
+    {
+      resource_manager_->import_joint_limiters(robot_description_);
+      RCLCPP_INFO(get_logger(), "Enforcing command limits is enabled...");
+    }
+    else
+    {
+      RCLCPP_INFO(
+        get_logger(),
+        "Enforcing command limits is disabled. Command limits from URDF will be ignored.");
+    }
+    init_services();
+  }
+  else
+  {
+    // Check if robot_description is available as a parameter before subscribing to the topic
+    if (this->has_parameter("robot_description"))
+    {
+      robot_description_ = this->get_parameter("robot_description").as_string();
+      if (!robot_description_.empty())
+      {
+        RCLCPP_INFO(get_logger(), "Received robot description from parameter.");
+        init_resource_manager(robot_description_);
+        if (is_resource_manager_initialized())
+        {
+          RCLCPP_INFO(
+            get_logger(),
+            "Resource Manager has been successfully initialized from parameter. "
+            "Starting Controller Manager services...");
+          init_services();
+        }
+      }
+    }
+
+    if (!is_resource_manager_initialized())
+    {
+      robot_description_notification_timer_ = create_wall_timer(
+        std::chrono::seconds(1),
+        [&]()
+        {
+          RCLCPP_WARN(
+            get_logger(), "Waiting for data on 'robot_description' topic to finish initialization");
+        });
+
+      // set QoS to transient local to get messages that have already been published
+      // (if robot state publisher starts before controller manager)
+      robot_description_subscription_ = create_subscription<std_msgs::msg::String>(
+        "robot_description", rclcpp::QoS(1).transient_local(),
+        std::bind(&ControllerManager::robot_description_callback, this, std::placeholders::_1));
+      RCLCPP_INFO(
+        get_logger(), "Subscribing to '%s' topic for robot description.",
+        robot_description_subscription_->get_topic_name());
+    }
+  }
 
   // Add on_shutdown callback to stop the controller manager
   rclcpp::Context::SharedPtr context = this->get_node_base_interface()->get_context();
@@ -896,7 +937,10 @@ void ControllerManager::init_resource_manager(const std::string & robot_descript
       }
     }
   }
-  robot_description_notification_timer_->cancel();
+  if (robot_description_notification_timer_)
+  {
+    robot_description_notification_timer_->cancel();
+  }
 
   auto hw_components_info = resource_manager_->get_components_status();
 
@@ -4817,6 +4861,18 @@ rclcpp::NodeOptions ControllerManager::determine_controller_node_options(
 
   controller_node_options = controller_node_options.arguments(node_options_arguments);
   controller_node_options.use_global_arguments(false);
+
+  // Forward robot_description_semantic (SRDF) to controllers if available.
+  // Uses parameter_overrides instead of --param to avoid XML parsing issues with CLI args.
+  // We also enable automatically_declare_parameters_from_overrides so the parameter override
+  // is declared on the controller node (rclcpp >= 21 controllers don't set this by default).
+  if (!robot_description_semantic_.empty())
+  {
+    controller_node_options.automatically_declare_parameters_from_overrides(true);
+    controller_node_options.append_parameter_override(
+      "robot_description_semantic", robot_description_semantic_);
+  }
+
   return controller_node_options;
 }
 
