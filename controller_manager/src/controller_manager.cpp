@@ -657,6 +657,17 @@ void ControllerManager::init_controller_manager()
     this, hardware_interface::CM_STATISTICS_TOPIC, hardware_interface::CM_STATISTICS_KEY);
   START_ROS2_CONTROL_INTROSPECTION_PUBLISHER_THREAD(hardware_interface::CM_STATISTICS_KEY);
 
+  // Read robot_description_semantic (SRDF) if available as a parameter.
+  // This is forwarded to controllers via --param in determine_controller_node_options().
+  if (this->has_parameter("robot_description_semantic"))
+  {
+    robot_description_semantic_ = this->get_parameter("robot_description_semantic").as_string();
+    if (!robot_description_semantic_.empty())
+    {
+      RCLCPP_INFO(get_logger(), "Loaded robot_description_semantic (SRDF) from parameter.");
+    }
+  }
+
   // Get parameters needed for RT "update" loop to work
   if (is_resource_manager_initialized())
   {
@@ -701,8 +712,7 @@ void ControllerManager::init_controller_manager()
         [&]()
         {
           RCLCPP_WARN(
-            get_logger(),
-            "Waiting for data on 'robot_description' topic to finish initialization");
+            get_logger(), "Waiting for data on 'robot_description' topic to finish initialization");
         });
 
       // set QoS to transient local to get messages that have already been published
@@ -4818,6 +4828,17 @@ rclcpp::NodeOptions ControllerManager::determine_controller_node_options(
     node_options_arguments.push_back("use_sim_time:=true");
   }
 
+  // Forward robot_description_semantic (SRDF) to controllers if available
+  if (!robot_description_semantic_.empty())
+  {
+    if (!check_for_element(node_options_arguments, RCL_ROS_ARGS_FLAG))
+    {
+      node_options_arguments.push_back(RCL_ROS_ARGS_FLAG);
+    }
+    node_options_arguments.push_back(RCL_PARAM_FLAG);
+    node_options_arguments.push_back("robot_description_semantic:=" + robot_description_semantic_);
+  }
+
   // Add options parsed through the spawner
   if (
     !controller.info.node_options_args.empty() &&
@@ -4832,8 +4853,22 @@ rclcpp::NodeOptions ControllerManager::determine_controller_node_options(
 
   std::string arguments;
   arguments.reserve(1000);
-  for (const auto & arg : node_options_arguments)
+  for (size_t i = 0; i < node_options_arguments.size(); ++i)
   {
+    const auto & arg = node_options_arguments[i];
+    // Suppress large robot description strings from the log
+    if (arg.find("robot_description") != std::string::npos)
+    {
+      continue;
+    }
+    // Also skip --param flags that precede a robot_description argument
+    if (
+      (arg == RCL_PARAM_FLAG || arg == RCL_SHORT_PARAM_FLAG) &&
+      i + 1 < node_options_arguments.size() &&
+      node_options_arguments[i + 1].find("robot_description") != std::string::npos)
+    {
+      continue;
+    }
     arguments.append(arg);
     arguments.append(" ");
   }
