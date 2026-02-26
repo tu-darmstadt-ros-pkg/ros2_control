@@ -4864,8 +4864,11 @@ rclcpp::NodeOptions ControllerManager::determine_controller_node_options(
 
   // Forward robot_description_semantic (SRDF) to controllers if available.
   // Uses parameter_overrides instead of --param to avoid XML parsing issues with CLI args.
+  // We also enable automatically_declare_parameters_from_overrides so the parameter override
+  // is declared on the controller node (rclcpp >= 21 controllers don't set this by default).
   if (!robot_description_semantic_.empty())
   {
+    controller_node_options.automatically_declare_parameters_from_overrides(true);
     controller_node_options.append_parameter_override(
       "robot_description_semantic", robot_description_semantic_);
   }
