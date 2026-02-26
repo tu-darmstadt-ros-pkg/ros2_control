@@ -672,7 +672,6 @@ private:
 
   rclcpp::NodeOptions cm_node_options_;
   std::string robot_description_;
-  std::string robot_description_semantic_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr robot_description_subscription_;
   rclcpp::TimerBase::SharedPtr robot_description_notification_timer_;
 

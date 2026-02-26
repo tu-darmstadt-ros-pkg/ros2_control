@@ -657,13 +657,13 @@ void ControllerManager::init_controller_manager()
     this, hardware_interface::CM_STATISTICS_TOPIC, hardware_interface::CM_STATISTICS_KEY);
   START_ROS2_CONTROL_INTROSPECTION_PUBLISHER_THREAD(hardware_interface::CM_STATISTICS_KEY);
 
-  // Read robot_description_semantic (SRDF) if available as a parameter.
-  // This is forwarded to controllers via parameter_overrides in
+  // Check if robot_description_semantic (SRDF) is available as a parameter.
+  // It will be forwarded to controllers via parameter_overrides in
   // determine_controller_node_options().
   if (this->has_parameter("robot_description_semantic"))
   {
-    robot_description_semantic_ = this->get_parameter("robot_description_semantic").as_string();
-    if (!robot_description_semantic_.empty())
+    const auto srdf = this->get_parameter("robot_description_semantic").as_string();
+    if (!srdf.empty())
     {
       RCLCPP_INFO(get_logger(), "Loaded robot_description_semantic (SRDF) from parameter.");
     }
@@ -4866,11 +4866,16 @@ rclcpp::NodeOptions ControllerManager::determine_controller_node_options(
   // Uses parameter_overrides instead of --param to avoid XML parsing issues with CLI args.
   // We also enable automatically_declare_parameters_from_overrides so the parameter override
   // is declared on the controller node (rclcpp >= 21 controllers don't set this by default).
-  if (!robot_description_semantic_.empty())
+  if (this->has_parameter("robot_description_semantic"))
   {
-    controller_node_options.automatically_declare_parameters_from_overrides(true);
-    controller_node_options.append_parameter_override(
-      "robot_description_semantic", robot_description_semantic_);
+    const auto robot_description_semantic =
+      this->get_parameter("robot_description_semantic").as_string();
+    if (!robot_description_semantic.empty())
+    {
+      controller_node_options.automatically_declare_parameters_from_overrides(true);
+      controller_node_options.append_parameter_override(
+        "robot_description_semantic", robot_description_semantic);
+    }
   }
 
   return controller_node_options;
