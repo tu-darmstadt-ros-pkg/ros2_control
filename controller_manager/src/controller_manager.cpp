@@ -637,6 +637,26 @@ void ControllerManager::init_controller_manager()
   resource_manager_->set_on_component_state_switch_callback(
     std::bind(&ControllerManager::publish_activity, this));
 
+  // Setup diagnostics
+  periodicity_stats_.reset();
+  diagnostics_updater_.setHardwareID("ros2_control");
+  diagnostics_updater_.add(
+    "Controllers Activity", this, &ControllerManager::controller_activity_diagnostic_callback);
+  diagnostics_updater_.add(
+    "Hardware Components Activity", this,
+    &ControllerManager::hardware_components_diagnostic_callback);
+  diagnostics_updater_.add(
+    "Controller Manager Activity", this,
+    &ControllerManager::controller_manager_diagnostic_callback);
+
+  INITIALIZE_ROS2_CONTROL_INTROSPECTION_REGISTRY(
+    this, hardware_interface::DEFAULT_INTROSPECTION_TOPIC,
+    hardware_interface::DEFAULT_REGISTRY_KEY);
+  START_ROS2_CONTROL_INTROSPECTION_PUBLISHER_THREAD(hardware_interface::DEFAULT_REGISTRY_KEY);
+  INITIALIZE_ROS2_CONTROL_INTROSPECTION_REGISTRY(
+    this, hardware_interface::CM_STATISTICS_TOPIC, hardware_interface::CM_STATISTICS_KEY);
+  START_ROS2_CONTROL_INTROSPECTION_PUBLISHER_THREAD(hardware_interface::CM_STATISTICS_KEY);
+
   // Get parameters needed for RT "update" loop to work
   if (is_resource_manager_initialized())
   {
@@ -695,26 +715,6 @@ void ControllerManager::init_controller_manager()
         robot_description_subscription_->get_topic_name());
     }
   }
-
-  // Setup diagnostics
-  periodicity_stats_.reset();
-  diagnostics_updater_.setHardwareID("ros2_control");
-  diagnostics_updater_.add(
-    "Controllers Activity", this, &ControllerManager::controller_activity_diagnostic_callback);
-  diagnostics_updater_.add(
-    "Hardware Components Activity", this,
-    &ControllerManager::hardware_components_diagnostic_callback);
-  diagnostics_updater_.add(
-    "Controller Manager Activity", this,
-    &ControllerManager::controller_manager_diagnostic_callback);
-
-  INITIALIZE_ROS2_CONTROL_INTROSPECTION_REGISTRY(
-    this, hardware_interface::DEFAULT_INTROSPECTION_TOPIC,
-    hardware_interface::DEFAULT_REGISTRY_KEY);
-  START_ROS2_CONTROL_INTROSPECTION_PUBLISHER_THREAD(hardware_interface::DEFAULT_REGISTRY_KEY);
-  INITIALIZE_ROS2_CONTROL_INTROSPECTION_REGISTRY(
-    this, hardware_interface::CM_STATISTICS_TOPIC, hardware_interface::CM_STATISTICS_KEY);
-  START_ROS2_CONTROL_INTROSPECTION_PUBLISHER_THREAD(hardware_interface::CM_STATISTICS_KEY);
 
   // Add on_shutdown callback to stop the controller manager
   rclcpp::Context::SharedPtr context = this->get_node_base_interface()->get_context();
