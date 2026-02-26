@@ -919,7 +919,10 @@ void ControllerManager::init_resource_manager(const std::string & robot_descript
       }
     }
   }
-  robot_description_notification_timer_->cancel();
+  if (robot_description_notification_timer_)
+  {
+    robot_description_notification_timer_->cancel();
+  }
 
   auto hw_components_info = resource_manager_->get_components_status();
 
