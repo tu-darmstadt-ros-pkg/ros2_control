@@ -23,6 +23,7 @@
 #include "hardware_interface/types/lifecycle_state_names.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
 #include "ros2_control_test_assets/test_hardware_interface_constants.hpp"
+#include "test_chainable_controller/test_chainable_controller.hpp"
 #include "test_controller/test_controller.hpp"
 
 using ::testing::_;
@@ -1045,90 +1046,180 @@ TEST_P(TestControllerManagerWithTestableCM, stop_controllers_on_hardware_write_d
   }
 }
 
-// Test that when hardware read fails, ALL controllers in the chain are deactivated,
+// Test that when hardware read/write fails, ALL controllers in the chain are deactivated,
 // not just the controller directly using the failed hardware.
-// We use the existing test_controller_actuator as the lowest controller (writes to HW),
-// add a chainable controller and a preceding controller above it.
-// When the actuator read fails, ALL controllers in the chain should be deactivated.
+//
+// Setup on TestActuatorHardware (joint1):
+//   hw_ctrl (TestController) claims joint1/position -> can trigger read/write errors
+//   chainable_ctrl (TestChainableController) claims joint1/max_velocity, exports ref interface
+//   preceding_ctrl (TestController) claims chainable_ctrl's ref interface
+//
+// When hw_ctrl triggers a HW error, ALL controllers on that HW must be deactivated.
+
 TEST_P(TestControllerManagerWithTestableCM, stop_chained_controllers_on_hardware_read_error)
 {
   auto strictness = GetParam().strictness;
-  SetupAndConfigureControllers(strictness);
 
-  // test_controller_actuator is already active and uses joint1/position (command) and
-  // joint1/position, joint1/velocity (state) on TestActuatorHardware.
-  // It can trigger a read error by setting its command interface to READ_FAIL_VALUE.
+  // hw_ctrl: directly writes to joint1/position (triggers the HW error)
+  auto hw_ctrl = std::make_shared<test_controller::TestController>();
+  hw_ctrl->set_command_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL,
+     {TEST_ACTUATOR_HARDWARE_COMMAND_INTERFACES[0]}});  // joint1/position
+  hw_ctrl->set_state_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL,
+     {TEST_ACTUATOR_HARDWARE_STATE_INTERFACES[0]}});  // joint1/position
+
+  // chainable_ctrl: uses joint1/max_velocity (2nd actuator cmd interface), exports ref interface
+  auto chainable_ctrl =
+    std::make_shared<test_chainable_controller::TestChainableController>();
+  chainable_ctrl->set_command_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL,
+     {TEST_ACTUATOR_HARDWARE_COMMAND_INTERFACES[1]}});  // joint1/max_velocity
+  chainable_ctrl->set_state_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL,
+     {TEST_ACTUATOR_HARDWARE_STATE_INTERFACES[0]}});  // joint1/position
+  chainable_ctrl->set_reference_interface_names({"joint1/input"});
+
+  // preceding_ctrl: writes to chainable's ref interface (NOT directly to HW)
+  auto preceding_ctrl = std::make_shared<test_controller::TestController>();
+  preceding_ctrl->set_command_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL,
+     {"chainable_ctrl/joint1/input"}});
+  preceding_ctrl->set_state_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL,
+     {TEST_ACTUATOR_HARDWARE_STATE_INTERFACES[0]}});
+
+  static constexpr char HW_CTRL[] = "hw_ctrl";
+  static constexpr char CHAINABLE_CTRL[] = "chainable_ctrl";
+  static constexpr char PRECEDING_CTRL[] = "preceding_ctrl";
+
+  cm_->add_controller(hw_ctrl, HW_CTRL, test_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    chainable_ctrl, CHAINABLE_CTRL, test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(preceding_ctrl, PRECEDING_CTRL, test_controller::TEST_CONTROLLER_CLASS_NAME);
+
+  {
+    ControllerManagerRunner<TestableControllerManager> cm_runner(this);
+    cm_->configure_controller(HW_CTRL);
+    cm_->configure_controller(CHAINABLE_CTRL);
+    cm_->configure_controller(PRECEDING_CTRL);
+  }
+
+  // Activate all controllers - the CM will sort them by chain dependency
+  switch_test_controllers({HW_CTRL, CHAINABLE_CTRL, PRECEDING_CTRL}, {}, strictness);
+
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE, hw_ctrl->get_lifecycle_state().id());
   ASSERT_EQ(
     lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
-    test_controller_actuator->get_lifecycle_state().id());
+    chainable_ctrl->get_lifecycle_state().id());
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    preceding_ctrl->get_lifecycle_state().id());
 
-  // Execute one cycle without errors
+  // Run one clean cycle
   EXPECT_EQ(controller_interface::return_type::OK, cm_->update(time_, PERIOD));
 
-  // Trigger hardware read error using the test_controller_actuator (which directly writes to HW)
-  test_controller_actuator->set_first_command_interface_value_to = test_constants::READ_FAIL_VALUE;
+  // Trigger HW read error via hw_ctrl writing READ_FAIL_VALUE to joint1/position
+  hw_ctrl->set_first_command_interface_value_to = test_constants::READ_FAIL_VALUE;
   EXPECT_EQ(controller_interface::return_type::OK, cm_->update(time_, PERIOD));
 
-  // Trigger the read error
   EXPECT_NO_THROW(cm_->read(time_, PERIOD));
 
-  // The actuator controller should be deactivated (direct HW user)
+  // hw_ctrl: deactivated (directly cached to failed HW)
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE, hw_ctrl->get_lifecycle_state().id())
+    << "hw_ctrl should be deactivated (direct HW user)";
+  // chainable_ctrl: deactivated (also cached to failed HW via joint1/max_velocity)
   EXPECT_EQ(
     lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
-    test_controller_actuator->get_lifecycle_state().id())
-    << "Actuator controller should be deactivated on HW read error";
-
-  // The broadcaster_all should also be deactivated (it uses ALL interfaces including actuator)
+    chainable_ctrl->get_lifecycle_state().id())
+    << "chainable_ctrl should be deactivated (uses failed HW)";
+  // preceding_ctrl: MUST also be deactivated via chain group propagation
+  // This is the core of the bug fix - without the fix, this controller would stay ACTIVE
   EXPECT_EQ(
     lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
-    test_broadcaster_all->get_lifecycle_state().id())
-    << "Broadcaster for all interfaces should be deactivated";
-
-  // The system controller should stay active (different hardware)
-  EXPECT_EQ(
-    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
-    test_controller_system->get_lifecycle_state().id())
-    << "System controller on different HW should stay active";
+    preceding_ctrl->get_lifecycle_state().id())
+    << "preceding_ctrl MUST be deactivated (upstream in chain of chainable_ctrl)";
 }
 
-// Same as above but for write errors. Uses the standard setup with test_controller_actuator
-// to directly trigger a hardware write error, verifying chain propagation.
 TEST_P(TestControllerManagerWithTestableCM, stop_chained_controllers_on_hardware_write_error)
 {
   auto strictness = GetParam().strictness;
-  SetupAndConfigureControllers(strictness);
+
+  auto hw_ctrl = std::make_shared<test_controller::TestController>();
+  hw_ctrl->set_command_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL,
+     {TEST_ACTUATOR_HARDWARE_COMMAND_INTERFACES[0]}});
+  hw_ctrl->set_state_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL,
+     {TEST_ACTUATOR_HARDWARE_STATE_INTERFACES[0]}});
+
+  auto chainable_ctrl =
+    std::make_shared<test_chainable_controller::TestChainableController>();
+  chainable_ctrl->set_command_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL,
+     {TEST_ACTUATOR_HARDWARE_COMMAND_INTERFACES[1]}});
+  chainable_ctrl->set_state_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL,
+     {TEST_ACTUATOR_HARDWARE_STATE_INTERFACES[0]}});
+  chainable_ctrl->set_reference_interface_names({"joint1/input"});
+
+  auto preceding_ctrl = std::make_shared<test_controller::TestController>();
+  preceding_ctrl->set_command_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL,
+     {"chainable_ctrl/joint1/input"}});
+  preceding_ctrl->set_state_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL,
+     {TEST_ACTUATOR_HARDWARE_STATE_INTERFACES[0]}});
+
+  static constexpr char HW_CTRL[] = "hw_ctrl";
+  static constexpr char CHAINABLE_CTRL[] = "chainable_ctrl";
+  static constexpr char PRECEDING_CTRL[] = "preceding_ctrl";
+
+  cm_->add_controller(hw_ctrl, HW_CTRL, test_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    chainable_ctrl, CHAINABLE_CTRL, test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(preceding_ctrl, PRECEDING_CTRL, test_controller::TEST_CONTROLLER_CLASS_NAME);
+
+  {
+    ControllerManagerRunner<TestableControllerManager> cm_runner(this);
+    cm_->configure_controller(HW_CTRL);
+    cm_->configure_controller(CHAINABLE_CTRL);
+    cm_->configure_controller(PRECEDING_CTRL);
+  }
+
+  switch_test_controllers({HW_CTRL, CHAINABLE_CTRL, PRECEDING_CTRL}, {}, strictness);
 
   ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE, hw_ctrl->get_lifecycle_state().id());
+  ASSERT_EQ(
     lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
-    test_controller_actuator->get_lifecycle_state().id());
+    chainable_ctrl->get_lifecycle_state().id());
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    preceding_ctrl->get_lifecycle_state().id());
 
-  // Execute one cycle without errors
   EXPECT_EQ(controller_interface::return_type::OK, cm_->update(time_, PERIOD));
 
-  // Trigger hardware write error using the test_controller_actuator
-  test_controller_actuator->set_first_command_interface_value_to = test_constants::WRITE_FAIL_VALUE;
+  // Trigger HW write error via hw_ctrl writing WRITE_FAIL_VALUE to joint1/position
+  hw_ctrl->set_first_command_interface_value_to = test_constants::WRITE_FAIL_VALUE;
   EXPECT_EQ(controller_interface::return_type::OK, cm_->update(time_, PERIOD));
 
-  // Trigger the write error
   EXPECT_NO_THROW(cm_->write(time_, PERIOD));
 
-  // The actuator controller should be deactivated (direct HW user)
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE, hw_ctrl->get_lifecycle_state().id())
+    << "hw_ctrl should be deactivated (direct HW user)";
   EXPECT_EQ(
     lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
-    test_controller_actuator->get_lifecycle_state().id())
-    << "Actuator controller should be deactivated on HW write error";
-
-  // The broadcaster_all should also be deactivated (it uses ALL interfaces including actuator)
+    chainable_ctrl->get_lifecycle_state().id())
+    << "chainable_ctrl should be deactivated (uses failed HW)";
+  // Core assertion: preceding_ctrl must NOT be left dangling
   EXPECT_EQ(
     lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
-    test_broadcaster_all->get_lifecycle_state().id())
-    << "Broadcaster for all interfaces should be deactivated";
-
-  // The system controller should stay active (different hardware)
-  EXPECT_EQ(
-    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
-    test_controller_system->get_lifecycle_state().id())
-    << "System controller on different HW should stay active";
+    preceding_ctrl->get_lifecycle_state().id())
+    << "preceding_ctrl MUST be deactivated (upstream in chain of chainable_ctrl)";
 }
 
 INSTANTIATE_TEST_SUITE_P(
