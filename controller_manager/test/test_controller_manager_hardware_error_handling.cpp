@@ -49,6 +49,12 @@ class TestableControllerManager : public controller_manager::ControllerManager
   FRIEND_TEST(TestControllerManagerWithTestableCM, stop_controllers_on_hardware_write_error);
   FRIEND_TEST(TestControllerManagerWithTestableCM, stop_controllers_on_hardware_write_deactivate);
   FRIEND_TEST(TestControllerManagerWithTestableCM, stop_controllers_on_multiple_hardware_error);
+  FRIEND_TEST(
+    TestControllerManagerWithTestableCM,
+    stop_chained_controllers_on_hardware_read_error);
+  FRIEND_TEST(
+    TestControllerManagerWithTestableCM,
+    stop_chained_controllers_on_hardware_write_error);
 
 public:
   TestableControllerManager(
@@ -1037,6 +1043,92 @@ TEST_P(TestControllerManagerWithTestableCM, stop_controllers_on_hardware_write_d
     EXPECT_GT(test_broadcaster_all->internal_counter, previous_counter_higher);
     EXPECT_GT(test_broadcaster_sensor->internal_counter, previous_counter_higher);
   }
+}
+
+// Test that when hardware read fails, ALL controllers in the chain are deactivated,
+// not just the controller directly using the failed hardware.
+// We use the existing test_controller_actuator as the lowest controller (writes to HW),
+// add a chainable controller and a preceding controller above it.
+// When the actuator read fails, ALL controllers in the chain should be deactivated.
+TEST_P(TestControllerManagerWithTestableCM, stop_chained_controllers_on_hardware_read_error)
+{
+  auto strictness = GetParam().strictness;
+  SetupAndConfigureControllers(strictness);
+
+  // test_controller_actuator is already active and uses joint1/position (command) and
+  // joint1/position, joint1/velocity (state) on TestActuatorHardware.
+  // It can trigger a read error by setting its command interface to READ_FAIL_VALUE.
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    test_controller_actuator->get_lifecycle_state().id());
+
+  // Execute one cycle without errors
+  EXPECT_EQ(controller_interface::return_type::OK, cm_->update(time_, PERIOD));
+
+  // Trigger hardware read error using the test_controller_actuator (which directly writes to HW)
+  test_controller_actuator->set_first_command_interface_value_to = test_constants::READ_FAIL_VALUE;
+  EXPECT_EQ(controller_interface::return_type::OK, cm_->update(time_, PERIOD));
+
+  // Trigger the read error
+  EXPECT_NO_THROW(cm_->read(time_, PERIOD));
+
+  // The actuator controller should be deactivated (direct HW user)
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    test_controller_actuator->get_lifecycle_state().id())
+    << "Actuator controller should be deactivated on HW read error";
+
+  // The broadcaster_all should also be deactivated (it uses ALL interfaces including actuator)
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    test_broadcaster_all->get_lifecycle_state().id())
+    << "Broadcaster for all interfaces should be deactivated";
+
+  // The system controller should stay active (different hardware)
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    test_controller_system->get_lifecycle_state().id())
+    << "System controller on different HW should stay active";
+}
+
+// Same as above but for write errors. Uses the standard setup with test_controller_actuator
+// to directly trigger a hardware write error, verifying chain propagation.
+TEST_P(TestControllerManagerWithTestableCM, stop_chained_controllers_on_hardware_write_error)
+{
+  auto strictness = GetParam().strictness;
+  SetupAndConfigureControllers(strictness);
+
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    test_controller_actuator->get_lifecycle_state().id());
+
+  // Execute one cycle without errors
+  EXPECT_EQ(controller_interface::return_type::OK, cm_->update(time_, PERIOD));
+
+  // Trigger hardware write error using the test_controller_actuator
+  test_controller_actuator->set_first_command_interface_value_to = test_constants::WRITE_FAIL_VALUE;
+  EXPECT_EQ(controller_interface::return_type::OK, cm_->update(time_, PERIOD));
+
+  // Trigger the write error
+  EXPECT_NO_THROW(cm_->write(time_, PERIOD));
+
+  // The actuator controller should be deactivated (direct HW user)
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    test_controller_actuator->get_lifecycle_state().id())
+    << "Actuator controller should be deactivated on HW write error";
+
+  // The broadcaster_all should also be deactivated (it uses ALL interfaces including actuator)
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    test_broadcaster_all->get_lifecycle_state().id())
+    << "Broadcaster for all interfaces should be deactivated";
+
+  // The system controller should stay active (different hardware)
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    test_controller_system->get_lifecycle_state().id())
+    << "System controller on different HW should stay active";
 }
 
 INSTANTIATE_TEST_SUITE_P(

@@ -3087,6 +3087,24 @@ void ControllerManager::read(const rclcpp::Time & time, const rclcpp::Duration &
       rt_buffer_.deactivate_controllers_list.insert(
         rt_buffer_.deactivate_controllers_list.end(), controllers.begin(), controllers.end());
     }
+    // Expand the deactivation list to include all controllers in the same chain groups.
+    // Without this, only controllers directly using the failed hardware are deactivated,
+    // leaving upstream controllers in an impossible state.
+    std::vector<ControllerSpec> & rt_controller_list =
+      rt_controllers_wrapper_.update_and_get_used_by_rt_list();
+    for (const auto & ctrl_name : std::vector<std::string>(rt_buffer_.deactivate_controllers_list))
+    {
+      auto ctrl_it = std::find_if(
+        rt_controller_list.begin(), rt_controller_list.end(),
+        std::bind(controller_name_compare, std::placeholders::_1, ctrl_name));
+      if (ctrl_it != rt_controller_list.end())
+      {
+        for (const auto & chain_ctrl : ctrl_it->controllers_chain_group)
+        {
+          ros2_control::add_item(rt_buffer_.deactivate_controllers_list, chain_ctrl);
+        }
+      }
+    }
     RCLCPP_ERROR(
       get_logger(),
       "Deactivating following hardware components as their read cycle resulted in an error: [ %s]",
@@ -3096,8 +3114,6 @@ void ControllerManager::read(const rclcpp::Time & time, const rclcpp::Duration &
       "Deactivating following controllers as their hardware components read cycle resulted in an "
       "error: [ %s]",
       rt_buffer_.get_concatenated_string(rt_buffer_.deactivate_controllers_list).c_str());
-    std::vector<ControllerSpec> & rt_controller_list =
-      rt_controllers_wrapper_.update_and_get_used_by_rt_list();
     perform_hardware_command_mode_change(
       rt_controller_list, {}, rt_buffer_.deactivate_controllers_list, "read");
     deactivate_controllers(rt_controller_list, rt_buffer_.deactivate_controllers_list);
@@ -3409,6 +3425,24 @@ void ControllerManager::write(const rclcpp::Time & time, const rclcpp::Duration 
       rt_buffer_.deactivate_controllers_list.insert(
         rt_buffer_.deactivate_controllers_list.end(), controllers.begin(), controllers.end());
     }
+    // Expand the deactivation list to include all controllers in the same chain groups.
+    // Without this, only controllers directly using the failed hardware are deactivated,
+    // leaving upstream controllers in an impossible state.
+    std::vector<ControllerSpec> & rt_controller_list =
+      rt_controllers_wrapper_.update_and_get_used_by_rt_list();
+    for (const auto & ctrl_name : std::vector<std::string>(rt_buffer_.deactivate_controllers_list))
+    {
+      auto ctrl_it = std::find_if(
+        rt_controller_list.begin(), rt_controller_list.end(),
+        std::bind(controller_name_compare, std::placeholders::_1, ctrl_name));
+      if (ctrl_it != rt_controller_list.end())
+      {
+        for (const auto & chain_ctrl : ctrl_it->controllers_chain_group)
+        {
+          ros2_control::add_item(rt_buffer_.deactivate_controllers_list, chain_ctrl);
+        }
+      }
+    }
     RCLCPP_ERROR(
       get_logger(),
       "Deactivating following hardware components as their write cycle resulted in an error: [ "
@@ -3419,8 +3453,6 @@ void ControllerManager::write(const rclcpp::Time & time, const rclcpp::Duration 
       "Deactivating following controllers as their hardware components write cycle resulted in an "
       "error: [ %s]",
       rt_buffer_.get_concatenated_string(rt_buffer_.deactivate_controllers_list).c_str());
-    std::vector<ControllerSpec> & rt_controller_list =
-      rt_controllers_wrapper_.update_and_get_used_by_rt_list();
 
     perform_hardware_command_mode_change(
       rt_controller_list, {}, rt_buffer_.deactivate_controllers_list, "write");
@@ -3460,13 +3492,27 @@ void ControllerManager::write(const rclcpp::Time & time, const rclcpp::Duration 
         }
       }
     }
+    // Expand the deactivation list to include all controllers in the same chain groups.
+    std::vector<ControllerSpec> & rt_controller_list =
+      rt_controllers_wrapper_.update_and_get_used_by_rt_list();
+    for (const auto & ctrl_name : std::vector<std::string>(rt_buffer_.deactivate_controllers_list))
+    {
+      auto ctrl_it = std::find_if(
+        rt_controller_list.begin(), rt_controller_list.end(),
+        std::bind(controller_name_compare, std::placeholders::_1, ctrl_name));
+      if (ctrl_it != rt_controller_list.end())
+      {
+        for (const auto & chain_ctrl : ctrl_it->controllers_chain_group)
+        {
+          ros2_control::add_item(rt_buffer_.deactivate_controllers_list, chain_ctrl);
+        }
+      }
+    }
     RCLCPP_ERROR_EXPRESSION(
       get_logger(), !rt_buffer_.deactivate_controllers_list.empty(),
       "Deactivating controllers [%s] as their command interfaces are tied to DEACTIVATEing "
       "hardware components",
       rt_buffer_.get_concatenated_string(rt_buffer_.deactivate_controllers_list).c_str());
-    std::vector<ControllerSpec> & rt_controller_list =
-      rt_controllers_wrapper_.update_and_get_used_by_rt_list();
 
     perform_hardware_command_mode_change(
       rt_controller_list, {}, rt_buffer_.deactivate_controllers_list, "write");
