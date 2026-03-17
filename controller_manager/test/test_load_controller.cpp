@@ -160,8 +160,11 @@ TEST_P(TestLoadedControllerParametrized, starting_and_stopping_a_controller)
     controller_if->get_lifecycle_state().id());
 
   {  // Test starting unconfigured controller, and starting configured afterwards
+    // Activating an unconfigured controller should fail regardless of strictness.
+    // Per the BEST_EFFORT doc: "returns false if all controllers are not yet configured."
     start_test_controller(
-      test_param.strictness, std::future_status::ready, test_param.expected_return);
+      test_param.strictness, std::future_status::ready,
+      controller_interface::return_type::ERROR);
 
     ASSERT_EQ(
       lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED,
@@ -211,9 +214,9 @@ TEST_P(TestLoadedControllerParametrized, can_not_start_finalized_controller)
     controller_if->get_node()->shutdown().id(),
     lifecycle_msgs::msg::State::PRIMARY_STATE_FINALIZED);
 
-  //  Start controller
+  //  Start controller - should fail regardless of strictness since the controller is finalized
   start_test_controller(
-    test_param.strictness, std::future_status::ready, test_param.expected_return);
+    test_param.strictness, std::future_status::ready, controller_interface::return_type::ERROR);
 
   // Can not configure finalize controller
   EXPECT_EQ(cm_->configure_controller(CONTROLLER_NAME_1), controller_interface::return_type::ERROR);

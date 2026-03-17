@@ -1543,7 +1543,10 @@ TEST_F(
     cm_->update(time_, rclcpp::Duration::from_seconds(0.01)));
   {
     ControllerManagerRunner cm_runner(this);
-    EXPECT_EQ(controller_interface::return_type::OK, switch_future.get());
+    // Activation should fail because the fallback controller has a non-existing command interface,
+    // making the activation impossible. BEST_EFFORT should return ERROR when all requested
+    // controller transitions fail.
+    EXPECT_EQ(controller_interface::return_type::ERROR, switch_future.get());
   }
 
   EXPECT_EQ(
@@ -1632,7 +1635,10 @@ TEST_F(
     cm_->update(time_, rclcpp::Duration::from_seconds(0.01)));
   {
     ControllerManagerRunner cm_runner(this);
-    EXPECT_EQ(controller_interface::return_type::OK, switch_future.get());
+    // Activation should fail because the fallback controller has a non-existing state interface,
+    // making the activation impossible. BEST_EFFORT should return ERROR when all requested
+    // controller transitions fail.
+    EXPECT_EQ(controller_interface::return_type::ERROR, switch_future.get());
   }
 
   EXPECT_EQ(

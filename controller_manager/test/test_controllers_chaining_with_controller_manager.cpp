@@ -52,6 +52,9 @@ class TestableTestChainableController : public test_chainable_controller::TestCh
     test_chained_controllers_deactivation_error_handling);
   FRIEND_TEST(
     TestControllerChainingWithControllerManager, test_chained_controllers_adding_in_random_order);
+  FRIEND_TEST(
+    TestControllerChainingWithControllerManager,
+    test_switch_controller_returns_error_when_deactivation_is_impossible);
 };
 
 class TestableControllerManager : public controller_manager::ControllerManager
@@ -86,6 +89,9 @@ class TestableControllerManager : public controller_manager::ControllerManager
     test_chained_controllers_deactivation_error_handling);
   FRIEND_TEST(
     TestControllerChainingWithControllerManager, test_chained_controllers_adding_in_random_order);
+  FRIEND_TEST(
+    TestControllerChainingWithControllerManager,
+    test_switch_controller_returns_error_when_deactivation_is_impossible);
 
 public:
   TestableControllerManager(
@@ -1196,8 +1202,10 @@ TEST_P(
   ASSERT_FALSE(sensor_fusion_controller->is_in_chained_mode());
 
   // Test Case 1: Trying to activate a preceding controller when following controller
-  // is not activated --> return error (If STRICT); Preceding controller is still inactive.
+  // is not activated --> return error. This is a genuine activation failure (not a no-op),
+  // so it should return ERROR in both STRICT and BEST_EFFORT modes.
 
+  // Expected behavior for Test Case 2 (mixed request where partial success is possible)
   static std::unordered_map<int32_t, ExpectedBehaviorStruct> expected = {
     {controller_manager_msgs::srv::SwitchController::Request::STRICT,
      {controller_interface::return_type::ERROR, std::future_status::ready,
@@ -1208,7 +1216,7 @@ TEST_P(
 
   // Attempt to activate preceding controller (diff-drive controller) with no check
   ActivateController(
-    DIFF_DRIVE_CONTROLLER, expected.at(test_param.strictness).return_type,
+    DIFF_DRIVE_CONTROLLER, controller_interface::return_type::ERROR,
     std::future_status::ready);
 
   // Check if the controller activated (Should not be activated)
@@ -1220,7 +1228,7 @@ TEST_P(
     sensor_fusion_controller->get_lifecycle_state().id());
 
   ActivateController(
-    SENSOR_FUSION_CONTROLLER, expected.at(test_param.strictness).return_type,
+    SENSOR_FUSION_CONTROLLER, controller_interface::return_type::ERROR,
     std::future_status::ready);
   // Check if the controller activated (Should not be activated)
   ASSERT_EQ(
@@ -1549,7 +1557,9 @@ TEST_P(
   // Test Case 5: Deactivating a preceding controller that is not active --> return error;
   // all controller stay in the same state
 
-  // There is different error and timeout behavior depending on strictness
+  // There is different error and timeout behavior depending on strictness.
+  // For BEST_EFFORT, deactivating an already-inactive controller is treated as a no-op
+  // (controller is already in target state) and returns OK.
   static std::unordered_map<int32_t, ExpectedBehaviorStruct> expected = {
     {controller_manager_msgs::srv::SwitchController::Request::STRICT,
      {controller_interface::return_type::ERROR, std::future_status::ready,
@@ -1653,10 +1663,11 @@ TEST_P(
     lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
     diff_drive_controller->get_lifecycle_state().id());
 
-  // Attempt to deactivate following controllers
+  // Attempt to deactivate following controllers while preceding controller is active.
+  // This is a genuine chain dependency failure, should return ERROR in both modes.
   switch_test_controllers(
     {}, {PID_LEFT_WHEEL, PID_RIGHT_WHEEL}, test_param.strictness, std::future_status::ready,
-    expected.at(test_param.strictness).return_type);
+    controller_interface::return_type::ERROR);
 
   // All controllers should still be active
   ASSERT_EQ(
@@ -1669,10 +1680,10 @@ TEST_P(
     lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
     diff_drive_controller->get_lifecycle_state().id());
 
-  // Attempt to deactivate a following controller
+  // Attempt to deactivate a single following controller - also should return ERROR.
   switch_test_controllers(
     {}, {PID_RIGHT_WHEEL}, test_param.strictness, std::future_status::ready,
-    expected.at(test_param.strictness).return_type);
+    controller_interface::return_type::ERROR);
 
   // All controllers should still be active
   ASSERT_EQ(
@@ -1777,14 +1788,8 @@ TEST_P(
     lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
     position_tracking_controller->get_lifecycle_state().id());
 
-  // There is different error and timeout behavior depending on strictness
-  static std::unordered_map<int32_t, ExpectedBehaviorStruct> expected = {
-    {controller_manager_msgs::srv::SwitchController::Request::STRICT,
-     {controller_interface::return_type::ERROR, std::future_status::ready,
-      lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE}},
-    {controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT,
-     {controller_interface::return_type::OK, std::future_status::ready,
-      lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE}}};
+  // Impossible deactivation should return ERROR regardless of strictness mode.
+  // Per the SwitchController.srv doc, BEST_EFFORT returns false when all requested transitions fail.
 
   // Test switch 'from chained mode' when controllers are deactivated and possible combination of
   // disabling controllers that use reference/state interfaces of the other controller. This is
@@ -1816,12 +1821,13 @@ TEST_P(
     lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
     robot_localization_controller->get_lifecycle_state().id());
 
-  // DiffDrive (preceding) controller is activated --> PID controller in chained mod
-  // Let's try to deactivate the diff_drive_control, it should fail as there are still other
-  // controllers that use it's resources
+  // DiffDrive (preceding) controller is activated --> PID controller in chained mode
+  // Let's try to deactivate the diff_drive_controller, it should fail as there are still other
+  // controllers that use its resources. This should return ERROR in both STRICT and BEST_EFFORT
+  // modes since the operation is impossible.
   DeactivateController(
-    DIFF_DRIVE_CONTROLLER, expected.at(test_param.strictness).return_type,
-    expected.at(test_param.strictness).future_status);
+    DIFF_DRIVE_CONTROLLER, controller_interface::return_type::ERROR,
+    std::future_status::ready);
   check_after_de_activate(
     diff_drive_controller, DIFF_DRIVE_CLAIMED_INTERFACES, 0u,
     controller_interface::return_type::ERROR, true, true);
@@ -1843,11 +1849,11 @@ TEST_P(
     robot_localization_controller->get_lifecycle_state().id());
 
   // Trying to deactivate the sensor fusion controller, however, it won't be deactivated as the
-  // robot localization controller is still active
+  // robot localization controller is still active. Should return ERROR in both modes.
   DeactivateAndCheckController(
     sensor_fusion_controller, SENSOR_FUSION_CONTROLLER, {}, 0u, true,
-    expected.at(test_param.strictness).return_type,
-    expected.at(test_param.strictness).future_status);
+    controller_interface::return_type::ERROR,
+    std::future_status::ready);
   EXPECT_TRUE(pid_left_wheel_controller->is_in_chained_mode());
   EXPECT_TRUE(pid_right_wheel_controller->is_in_chained_mode());
   ASSERT_FALSE(diff_drive_controller->is_in_chained_mode());
@@ -2132,6 +2138,106 @@ TEST_P(TestControllerChainingWithControllerManager, test_chained_controllers_add
 
   reference = {1024.0, 4096.0};
   UpdateAllControllerAndCheck(reference, 3u);
+}
+
+// Test that switch_controller returns ERROR (not OK) when attempting to deactivate a following
+// controller that has an active preceding controller depending on it. This verifies that the
+// controller manager does not silently return success for impossible deactivation requests.
+// Bug: In BEST_EFFORT mode, the controller was silently removed from the deactivation list and
+// switch_controller returned OK with "no controllers need to be activated or deactivated" message.
+TEST_P(
+  TestControllerChainingWithControllerManager,
+  test_switch_controller_returns_error_when_deactivation_is_impossible)
+{
+  SetupControllers();
+
+  // add controllers in execution order
+  cm_->add_controller(
+    position_tracking_controller, POSITION_TRACKING_CONTROLLER,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    diff_drive_controller, DIFF_DRIVE_CONTROLLER,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    diff_drive_controller_two, DIFF_DRIVE_CONTROLLER_TWO,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    pid_left_wheel_controller, PID_LEFT_WHEEL,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    pid_right_wheel_controller, PID_RIGHT_WHEEL,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    odom_publisher_controller, ODOM_PUBLISHER_CONTROLLER,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    sensor_fusion_controller, SENSOR_FUSION_CONTROLLER,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    robot_localization_controller, ROBOT_LOCALIZATION_CONTROLLER,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    position_tracking_controller_two, POSITION_TRACKING_CONTROLLER_TWO,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    all_state_broadcaster, ALL_STATE_BROADCASTER,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+
+  CheckIfControllersAreAddedCorrectly();
+  ConfigureAndCheckControllers();
+
+  // Activate the chain: pid_left, pid_right (following), then diff_drive (preceding)
+  ActivateAndCheckController(
+    pid_left_wheel_controller, PID_LEFT_WHEEL, PID_LEFT_WHEEL_CLAIMED_INTERFACES, 1u);
+  ActivateAndCheckController(
+    pid_right_wheel_controller, PID_RIGHT_WHEEL, PID_RIGHT_WHEEL_CLAIMED_INTERFACES, 1u);
+  ActivateAndCheckController(
+    diff_drive_controller, DIFF_DRIVE_CONTROLLER, DIFF_DRIVE_CLAIMED_INTERFACES, 1u);
+
+  // Verify all three are active
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    pid_left_wheel_controller->get_lifecycle_state().id());
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    pid_right_wheel_controller->get_lifecycle_state().id());
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    diff_drive_controller->get_lifecycle_state().id());
+
+  // Attempt to deactivate a following controller (pid_left_wheel) while the preceding
+  // controller (diff_drive) is still active. This should ALWAYS return ERROR regardless
+  // of strictness mode, because the operation is impossible.
+  switch_test_controllers(
+    {}, {PID_LEFT_WHEEL}, test_param.strictness, std::future_status::ready,
+    controller_interface::return_type::ERROR);
+
+  // All controllers should remain active - nothing should have changed
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    pid_left_wheel_controller->get_lifecycle_state().id());
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    pid_right_wheel_controller->get_lifecycle_state().id());
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    diff_drive_controller->get_lifecycle_state().id());
+
+  // Also test deactivating both following controllers at once
+  switch_test_controllers(
+    {}, {PID_LEFT_WHEEL, PID_RIGHT_WHEEL}, test_param.strictness, std::future_status::ready,
+    controller_interface::return_type::ERROR);
+
+  // All controllers should still remain active
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    pid_left_wheel_controller->get_lifecycle_state().id());
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    pid_right_wheel_controller->get_lifecycle_state().id());
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    diff_drive_controller->get_lifecycle_state().id());
 }
 
 INSTANTIATE_TEST_SUITE_P(

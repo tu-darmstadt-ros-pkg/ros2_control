@@ -1833,6 +1833,12 @@ controller_interface::return_type ControllerManager::switch_controller_cb(
 
   const std::vector<ControllerSpec> & controllers = rt_controllers_wrapper_.get_updated_list(guard);
 
+  // Track whether any controller was removed from the request lists during BEST_EFFORT
+  // validation due to a genuine failure (e.g. chain dependency preventing deactivation).
+  // This is distinct from no-op cases (e.g. already in target state).
+  bool had_activation_failure = false;
+  bool had_deactivation_failure = false;
+
   // if a preceding controller is deactivated, all first-level controllers should be switched 'from'
   // chained mode
   propagate_deactivation_of_chained_mode(controllers);
@@ -1847,6 +1853,7 @@ controller_interface::return_type ControllerManager::switch_controller_cb(
     controller_interface::return_type status = controller_interface::return_type::OK;
 
     // if controller is not inactive then do not do any following-controllers checks
+    bool is_already_in_target_state = false;
     if (is_controller_unconfigured(*controller_it->c))
     {
       message = fmt::format(
@@ -1869,6 +1876,7 @@ controller_interface::return_type ControllerManager::switch_controller_cb(
         RCLCPP_WARN(get_logger(), "%s", message.c_str());
         RCLCPP_WARN(get_logger(), "%s", message.c_str());
         status = controller_interface::return_type::ERROR;
+        is_already_in_target_state = true;
       }
     }
     else if (!is_controller_inactive(controller_it->c))
@@ -1908,6 +1916,10 @@ controller_interface::return_type ControllerManager::switch_controller_cb(
         // remove controller that can not be activated from the activation request and step-back
         // iterator to correctly step to the next element in the list in the loop
         switch_params_.activate_request.erase(ctrl_it);
+        if (!is_already_in_target_state)
+        {
+          had_activation_failure = true;
+        }
         message.clear();
         --ctrl_it;
       }
@@ -1931,6 +1943,7 @@ controller_interface::return_type ControllerManager::switch_controller_cb(
     controller_interface::return_type status = controller_interface::return_type::OK;
 
     // if controller is not active then skip preceding-controllers checks
+    bool is_already_in_target_state = false;
     if (!is_controller_active(controller_it->c))
     {
       message = fmt::format(
@@ -1938,6 +1951,7 @@ controller_interface::return_type ControllerManager::switch_controller_cb(
         controller_it->info.name);
       RCLCPP_WARN(get_logger(), "%s", message.c_str());
       status = controller_interface::return_type::ERROR;
+      is_already_in_target_state = true;
     }
     else
     {
@@ -1955,9 +1969,13 @@ controller_interface::return_type ControllerManager::switch_controller_cb(
         (*ctrl_it).c_str());
       if (strictness == controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT)
       {
-        // remove controller that can not be activated from the activation request and step-back
+        // remove controller that can not be deactivated from the deactivation request and step-back
         // iterator to correctly step to the next element in the list in the loop
         switch_params_.deactivate_request.erase(ctrl_it);
+        if (!is_already_in_target_state)
+        {
+          had_deactivation_failure = true;
+        }
         message.clear();
         --ctrl_it;
       }
@@ -1974,6 +1992,18 @@ controller_interface::return_type ControllerManager::switch_controller_cb(
   // Check after the check if the activate and deactivate list is empty or not
   if (switch_params_.activate_request.empty() && switch_params_.deactivate_request.empty())
   {
+    // If any controller was removed due to a genuine validation failure (not a no-op like
+    // "already in target state"), the requested operation was impossible. Return ERROR.
+    if (had_activation_failure || had_deactivation_failure)
+    {
+      message =
+        "Could not activate or deactivate any of the requested controllers. "
+        "Check the state of the controllers and their required interfaces using "
+        "`ros2 control list_controllers -v` CLI to get more information.";
+      RCLCPP_ERROR(get_logger(), "%s", message.c_str());
+      clear_requests();
+      return controller_interface::return_type::ERROR;
+    }
     message = "After checking the controllers, no controllers need to be activated or deactivated.";
     RCLCPP_INFO(get_logger(), "%s", message.c_str());
     clear_requests();
