@@ -162,6 +162,16 @@ if(BUILD_TESTING)
     ros2_control_test_assets::ros2_control_test_assets
   )
 
+  ament_add_gmock(test_controller_manager_chain_switching
+    test/test_controller_manager_chain_switching.cpp
+  )
+  target_link_libraries(test_controller_manager_chain_switching
+    controller_manager
+    test_chainable_controller
+    test_controller
+    ros2_control_test_assets::ros2_control_test_assets
+  )
+
   ament_add_gmock(test_controller_manager_srvs
     test/test_controller_manager_srvs.cpp
     APPEND_ENV AMENT_PREFIX_PATH=${ament_index_build_path}_$<CONFIG>

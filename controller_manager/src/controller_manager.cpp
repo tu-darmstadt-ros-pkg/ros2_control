@@ -17,6 +17,7 @@
 #include <fmt/compile.h>
 
 #include <memory>
+#include <queue>
 #include <set>
 #include <string>
 #include <utility>
@@ -1893,21 +1894,14 @@ controller_interface::return_type ControllerManager::switch_controller_cb(
                    ? controller_manager_msgs::srv::SwitchController::Request::STRICT
                    : controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
   }
-  else if (strictness == controller_manager_msgs::srv::SwitchController::Request::AUTO)
+  const bool is_auto =
+    strictness == controller_manager_msgs::srv::SwitchController::Request::AUTO;
+  const bool is_force_auto =
+    strictness == controller_manager_msgs::srv::SwitchController::Request::FORCE_AUTO;
+  if (is_auto || is_force_auto)
   {
-    RCLCPP_WARN(
-      get_logger(),
-      "Controller Manager: AUTO is not currently implemented. "
-      "Defaulting to BEST_EFFORT");
-    strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
-  }
-  else if (strictness == controller_manager_msgs::srv::SwitchController::Request::FORCE_AUTO)
-  {
-    RCLCPP_DEBUG(
-      get_logger(),
-      "Controller Manager: FORCE_AUTO is not currently implemented. "
-      "Defaulting to BEST_EFFORT");
-    strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
+    // AUTO and FORCE_AUTO use STRICT semantics after dependency expansion
+    strictness = controller_manager_msgs::srv::SwitchController::Request::STRICT;
   }
 
   std::string activate_list, deactivate_list;
@@ -2007,6 +2001,197 @@ controller_interface::return_type ControllerManager::switch_controller_cb(
   std::lock_guard<std::recursive_mutex> guard(rt_controllers_wrapper_.controllers_lock_);
 
   const std::vector<ControllerSpec> & controllers = rt_controllers_wrapper_.get_updated_list(guard);
+
+  // AUTO / FORCE_AUTO: expand activate/deactivate lists with chain dependencies
+  if (is_auto || is_force_auto)
+  {
+    // Step 1: Expand activate list with command-chain dependencies only.
+    // We must NOT follow state-interface consumers (e.g., odom_publisher reading
+    // diff_drive state) — they are optional consumers, not required dependencies.
+    std::vector<std::string> expanded_activate;
+    std::queue<std::string> to_expand;
+    for (const auto & name : switch_params_.activate_request)
+    {
+      to_expand.push(name);
+    }
+    while (!to_expand.empty())
+    {
+      const auto ctrl = to_expand.front();
+      to_expand.pop();
+      if (ros2_control::has_item(expanded_activate, ctrl))
+      {
+        continue;
+      }
+      expanded_activate.push_back(ctrl);
+      // Walk command interfaces to find controllers whose reference interfaces we need
+      auto ctrl_it = std::find_if(
+        controllers.begin(), controllers.end(),
+        std::bind(controller_name_compare, std::placeholders::_1, ctrl));
+      if (ctrl_it != controllers.end())
+      {
+        auto cmd_names = get_command_interfaces_names(ctrl_it->c, resource_manager_);
+        for (const auto & cmd : cmd_names)
+        {
+          ControllersListIterator chained_ctrl_it;
+          if (is_interface_a_chained_interface(cmd, controllers, chained_ctrl_it))
+          {
+            to_expand.push(chained_ctrl_it->info.name);
+          }
+        }
+        // Also walk state interfaces to find controllers that provide state we read.
+        // This does NOT add state-interface consumers (the reverse direction).
+        auto state_names = get_state_interfaces_names(ctrl_it->c, resource_manager_);
+        for (const auto & state : state_names)
+        {
+          ControllersListIterator chained_ctrl_it;
+          if (is_interface_a_chained_interface(state, controllers, chained_ctrl_it))
+          {
+            to_expand.push(chained_ctrl_it->info.name);
+          }
+        }
+      }
+    }
+
+    // Step 2: Check for impossible combinations (same resource in activation set)
+    std::set<std::string> needed_resources;
+    for (const auto & name : expanded_activate)
+    {
+      auto ctrl_it = std::find_if(
+        controllers.begin(), controllers.end(),
+        std::bind(controller_name_compare, std::placeholders::_1, name));
+      if (ctrl_it == controllers.end())
+      {
+        continue;
+      }
+      auto cmd_names = get_command_interfaces_names(ctrl_it->c, resource_manager_);
+      for (const auto & cmd : cmd_names)
+      {
+        if (needed_resources.count(cmd) > 0)
+        {
+          message = fmt::format(
+            "{}: resource '{}' claimed by multiple controllers in the activation set.",
+            is_force_auto ? "FORCE_AUTO" : "AUTO", cmd);
+          RCLCPP_ERROR(get_logger(), "%s", message.c_str());
+          clear_requests();
+          return controller_interface::return_type::ERROR;
+        }
+        needed_resources.insert(cmd);
+      }
+    }
+
+    // Step 3: Find active controllers that conflict with the expanded activation set
+    std::vector<std::string> deactivation_candidates;
+    for (const auto & ctrl : controllers)
+    {
+      if (!is_controller_active(ctrl.c))
+      {
+        continue;
+      }
+      if (ros2_control::has_item(expanded_activate, ctrl.info.name))
+      {
+        continue;
+      }
+      if (ros2_control::has_item(switch_params_.deactivate_request, ctrl.info.name))
+      {
+        continue;
+      }
+      auto cmd_names = get_command_interfaces_names(ctrl.c, resource_manager_);
+      for (const auto & cmd : cmd_names)
+      {
+        if (needed_resources.count(cmd) > 0)
+        {
+          deactivation_candidates.push_back(ctrl.info.name);
+          break;
+        }
+      }
+    }
+
+    // Step 4: Handle conflicts differently for AUTO vs FORCE_AUTO
+    if (!deactivation_candidates.empty())
+    {
+      if (is_auto)
+      {
+        // AUTO does not auto-deactivate — user must explicitly specify what to stop
+        message = fmt::format(
+          "AUTO: cannot activate requested controllers because active controller(s) [{}] "
+          "claim conflicting resources. Use FORCE_AUTO or explicitly deactivate them.",
+          fmt::join(deactivation_candidates, ", "));
+        RCLCPP_ERROR(get_logger(), "%s", message.c_str());
+        clear_requests();
+        return controller_interface::return_type::ERROR;
+      }
+
+      // FORCE_AUTO: auto-deactivate conflicting controllers + upstream dependents
+      std::queue<std::string> deact_expand;
+      for (const auto & name : deactivation_candidates)
+      {
+        deact_expand.push(name);
+      }
+      while (!deact_expand.empty())
+      {
+        const auto ctrl = deact_expand.front();
+        deact_expand.pop();
+        if (ros2_control::has_item(switch_params_.deactivate_request, ctrl))
+        {
+          continue;
+        }
+        auto ctrl_it = std::find_if(
+          controllers.begin(), controllers.end(),
+          std::bind(controller_name_compare, std::placeholders::_1, ctrl));
+        if (ctrl_it == controllers.end() || !is_controller_active(ctrl_it->c))
+        {
+          continue;
+        }
+        if (ros2_control::has_item(expanded_activate, ctrl))
+        {
+          continue;
+        }
+        switch_params_.deactivate_request.push_back(ctrl);
+        auto chain_it = controller_chain_spec_.find(ctrl);
+        if (chain_it != controller_chain_spec_.end())
+        {
+          for (const auto & dependent : chain_it->second.preceding_controllers)
+          {
+            deact_expand.push(dependent);
+          }
+        }
+        // Also deactivate controllers that read this controller's exported state interfaces
+        auto state_cache_it = controller_chained_state_interfaces_cache_.find(ctrl);
+        if (state_cache_it != controller_chained_state_interfaces_cache_.end())
+        {
+          for (const auto & state_dependent : state_cache_it->second)
+          {
+            deact_expand.push(state_dependent);
+          }
+        }
+      }
+    }
+
+    // Step 5: Build final activate list (skip already-active controllers)
+    std::vector<std::string> final_activate;
+    for (const auto & name : expanded_activate)
+    {
+      auto ctrl_it = std::find_if(
+        controllers.begin(), controllers.end(),
+        std::bind(controller_name_compare, std::placeholders::_1, name));
+      if (ctrl_it == controllers.end())
+      {
+        continue;
+      }
+      bool already_active = is_controller_active(ctrl_it->c);
+      bool being_deactivated = ros2_control::has_item(switch_params_.deactivate_request, name);
+      if (!already_active || being_deactivated)
+      {
+        final_activate.push_back(name);
+      }
+    }
+    switch_params_.activate_request = final_activate;
+
+    RCLCPP_INFO(
+      get_logger(), "%s mode: expanded activate to %zu controllers, deactivate to %zu controllers",
+      is_force_auto ? "FORCE_AUTO" : "AUTO", switch_params_.activate_request.size(),
+      switch_params_.deactivate_request.size());
+  }
 
   // if a preceding controller is deactivated, all first-level controllers should be switched 'from'
   // chained mode
