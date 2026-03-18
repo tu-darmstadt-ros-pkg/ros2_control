@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "controller_manager/controller_manager.hpp"
+#include "controller_manager_msgs/msg/controller_manager_activity.hpp"
 #include "controller_manager_test_common.hpp"
 #include "gmock/gmock.h"
 #include "hardware_interface/types/lifecycle_state_names.hpp"
@@ -49,6 +50,10 @@ class TestableControllerManager : public controller_manager::ControllerManager
   FRIEND_TEST(TestControllerManagerWithTestableCM, stop_controllers_on_hardware_write_error);
   FRIEND_TEST(TestControllerManagerWithTestableCM, stop_controllers_on_hardware_write_deactivate);
   FRIEND_TEST(TestControllerManagerWithTestableCM, stop_controllers_on_multiple_hardware_error);
+  FRIEND_TEST(
+    TestControllerManagerWithTestableCM, activity_topic_updated_on_hardware_read_error);
+  FRIEND_TEST(
+    TestControllerManagerWithTestableCM, activity_topic_updated_on_hardware_write_error);
 
 public:
   TestableControllerManager(
@@ -171,6 +176,41 @@ public:
       {TEST_CONTROLLER_ACTUATOR_NAME, TEST_CONTROLLER_SYSTEM_NAME, TEST_BROADCASTER_ALL_NAME,
        TEST_BROADCASTER_SENSOR_NAME},
       {}, strictness);
+  }
+
+  // Returns the controller state from the activity message, or empty if not found.
+  uint8_t get_controller_state_from_activity(const std::string & controller_name)
+  {
+    controller_manager_msgs::msg::ControllerManagerActivity::SharedPtr received_msg;
+    rclcpp::Node test_node("activity_test_node");
+    auto subscription =
+      test_node.create_subscription<controller_manager_msgs::msg::ControllerManagerActivity>(
+        std::string("/") + TEST_CM_NAME + "/activity",
+        rclcpp::QoS(1).reliable().transient_local(),
+        [&](const controller_manager_msgs::msg::ControllerManagerActivity::SharedPtr msg)
+        { received_msg = msg; });
+
+    rclcpp::executors::SingleThreadedExecutor executor;
+    executor.add_node(test_node.get_node_base_interface());
+    for (int i = 0; i < 50 && !received_msg; ++i)
+    {
+      executor.spin_some();
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    EXPECT_TRUE(received_msg) << "No activity message received";
+    if (!received_msg)
+    {
+      return 0;
+    }
+    for (const auto & ctrl : received_msg->controllers)
+    {
+      if (ctrl.name == controller_name)
+      {
+        return ctrl.state.id;
+      }
+    }
+    ADD_FAILURE() << "Controller " << controller_name << " not found in activity message";
+    return 0;
   }
 
   static constexpr char TEST_CONTROLLER_ACTUATOR_NAME[] = "test_controller_actuator";
@@ -1037,6 +1077,68 @@ TEST_P(TestControllerManagerWithTestableCM, stop_controllers_on_hardware_write_d
     EXPECT_GT(test_broadcaster_all->internal_counter, previous_counter_higher);
     EXPECT_GT(test_broadcaster_sensor->internal_counter, previous_counter_higher);
   }
+}
+
+// Activity topic must reflect controller deactivation after a hardware read error.
+TEST_P(TestControllerManagerWithTestableCM, activity_topic_updated_on_hardware_read_error)
+{
+  auto strictness = GetParam().strictness;
+  SetupAndConfigureControllers(strictness);
+
+  EXPECT_EQ(controller_interface::return_type::OK, cm_->update(time_, PERIOD));
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    test_controller_actuator->get_lifecycle_state().id());
+
+  // Verify activity topic shows active before the error
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    get_controller_state_from_activity(TEST_CONTROLLER_ACTUATOR_NAME));
+
+  // Trigger hardware read error
+  test_controller_actuator->set_first_command_interface_value_to = test_constants::READ_FAIL_VALUE;
+  EXPECT_EQ(controller_interface::return_type::OK, cm_->update(time_, PERIOD));
+  EXPECT_NO_THROW(cm_->read(time_, PERIOD));
+
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    test_controller_actuator->get_lifecycle_state().id());
+
+  // Activity topic must reflect the deactivation
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    get_controller_state_from_activity(TEST_CONTROLLER_ACTUATOR_NAME));
+}
+
+// Activity topic must reflect controller deactivation after a hardware write error.
+TEST_P(TestControllerManagerWithTestableCM, activity_topic_updated_on_hardware_write_error)
+{
+  auto strictness = GetParam().strictness;
+  SetupAndConfigureControllers(strictness);
+
+  EXPECT_EQ(controller_interface::return_type::OK, cm_->update(time_, PERIOD));
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    test_controller_actuator->get_lifecycle_state().id());
+
+  // Verify activity topic shows active before the error
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    get_controller_state_from_activity(TEST_CONTROLLER_ACTUATOR_NAME));
+
+  // Trigger hardware write error
+  test_controller_actuator->set_first_command_interface_value_to = test_constants::WRITE_FAIL_VALUE;
+  EXPECT_EQ(controller_interface::return_type::OK, cm_->update(time_, PERIOD));
+  EXPECT_NO_THROW(cm_->write(time_, PERIOD));
+
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    test_controller_actuator->get_lifecycle_state().id());
+
+  // Activity topic must reflect the deactivation
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    get_controller_state_from_activity(TEST_CONTROLLER_ACTUATOR_NAME));
 }
 
 INSTANTIATE_TEST_SUITE_P(
