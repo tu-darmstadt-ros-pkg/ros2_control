@@ -321,6 +321,10 @@ void extract_command_interfaces_for_controller(
   const std::unique_ptr<hardware_interface::ResourceManager> & resource_manager,
   std::vector<std::string> & request_interface_list)
 {
+  if (!is_controller_active(ctrl.c) && !is_controller_inactive(ctrl.c))
+  {
+    return;
+  }
   const std::vector<std::string> command_interface_names =
     get_command_interfaces_names(ctrl.c, resource_manager);
   request_interface_list.insert(
@@ -560,6 +564,7 @@ ControllerManager::ControllerManager(
     params_->defaults.allow_controller_activation_with_inactive_hardware;
   params.return_failed_hardware_names_on_return_deactivate_write_cycle_ =
     params_->defaults.deactivate_controllers_on_hardware_self_deactivate;
+  params.handle_exceptions = params_->handle_exceptions;
   resource_manager_ =
     std::make_unique<hardware_interface::ResourceManager>(params, !robot_description_.empty());
   init_controller_manager();
@@ -839,6 +844,7 @@ void ControllerManager::init_resource_manager(const std::string & robot_descript
   params.executor = executor_;
   params.node_namespace = this->get_namespace();
   params.update_rate = static_cast<unsigned int>(params_->update_rate);
+  params.handle_exceptions = params_->handle_exceptions;
   if (!resource_manager_->load_and_initialize_components(params))
   {
     RCLCPP_WARN(
@@ -913,13 +919,28 @@ void ControllerManager::init_resource_manager(const std::string & robot_descript
     rclcpp_lifecycle::State(
       State::PRIMARY_STATE_INACTIVE, hardware_interface::lifecycle_state_names::INACTIVE));
 
-  // activate all other components
-  for (const auto & [component, state] : components_to_activate)
+  // Group components by their group name for coordinated lifecycle transitions
+  std::unordered_map<std::string, std::vector<std::string>> components_by_group;
+  std::vector<std::string> ungrouped_components;
+
+  for (const auto & [component_name, component_info] : components_to_activate)
   {
-    rclcpp_lifecycle::State active_state(
-      State::PRIMARY_STATE_ACTIVE, hardware_interface::lifecycle_state_names::ACTIVE);
+    if (component_info.group.empty())
+    {
+      ungrouped_components.push_back(component_name);
+    }
+    else
+    {
+      components_by_group[component_info.group].push_back(component_name);
+    }
+  }
+
+  // Helper lambda to set component state with error handling
+  auto set_component_state_with_error_handling =
+    [&](const std::string & component_name, rclcpp_lifecycle::State target_state) -> bool
+  {
     if (
-      resource_manager_->set_component_state(component, active_state) ==
+      resource_manager_->set_component_state(component_name, target_state) ==
       hardware_interface::return_type::ERROR)
     {
       if (params_->hardware_components_initial_state.shutdown_on_initial_state_failure)
@@ -927,16 +948,130 @@ void ControllerManager::init_resource_manager(const std::string & robot_descript
         throw std::runtime_error(
           fmt::format(
             FMT_COMPILE("Failed to set the initial state of the component : {} to {}"),
-            component.c_str(), active_state.label()));
+            component_name.c_str(), target_state.label()));
       }
       else
       {
         RCLCPP_ERROR(
           get_logger(), "Failed to set the initial state of the component : '%s' to '%s'",
-          component.c_str(), active_state.label().c_str());
+          component_name.c_str(), target_state.label().c_str());
+        return false;
       }
     }
+    return true;
+  };
+
+  // Define lifecycle states
+  rclcpp_lifecycle::State inactive_state(
+    State::PRIMARY_STATE_INACTIVE, hardware_interface::lifecycle_state_names::INACTIVE);
+  rclcpp_lifecycle::State active_state(
+    State::PRIMARY_STATE_ACTIVE, hardware_interface::lifecycle_state_names::ACTIVE);
+
+  // Process grouped components: first configure all in group, then activate all
+  // If any component fails, rollback all components in the group to a safe state
+  for (const auto & [group_name, group_components] : components_by_group)
+  {
+    RCLCPP_INFO(
+      get_logger(), "Processing hardware component group '%s' with %zu components.",
+      group_name.c_str(), group_components.size());
+
+    // First, configure all components in the group (transition to inactive state)
+    std::vector<std::string> successfully_configured;
+    bool configuration_failed = false;
+    for (const auto & component_name : group_components)
+    {
+      RCLCPP_INFO(
+        get_logger(), "Configuring component '%s' in group '%s'.", component_name.c_str(),
+        group_name.c_str());
+      if (set_component_state_with_error_handling(component_name, inactive_state))
+      {
+        successfully_configured.push_back(component_name);
+      }
+      else
+      {
+        RCLCPP_ERROR(
+          get_logger(),
+          "Component '%s' in group '%s' failed to configure. Configuring of the remaining "
+          "components in the group will be skipped....",
+          component_name.c_str(), group_name.c_str());
+        configuration_failed = true;
+        break;
+      }
+    }
+
+    // If configuration failed, skip activation
+    if (configuration_failed)
+    {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Group '%s' failed during configuration phase. All components in the group will remain "
+        "in their current state.",
+        group_name.c_str());
+      continue;  // Skip to next group
+    }
+
+    // Then, activate all successfully configured components in the group
+    std::vector<std::string> successfully_activated;
+    bool activation_failed = false;
+    for (const auto & component_name : successfully_configured)
+    {
+      RCLCPP_INFO(
+        get_logger(), "Activating component '%s' in group '%s'.", component_name.c_str(),
+        group_name.c_str());
+      if (set_component_state_with_error_handling(component_name, active_state))
+      {
+        successfully_activated.push_back(component_name);
+      }
+      else
+      {
+        RCLCPP_ERROR(
+          get_logger(),
+          "Component '%s' in group '%s' failed to activate. Rolling back all activated components "
+          "in the group to inactive state.",
+          component_name.c_str(), group_name.c_str());
+        activation_failed = true;
+        break;
+      }
+    }
+
+    // If activation failed, deactivate all successfully activated components back to inactive
+    if (activation_failed)
+    {
+      for (const auto & activated_component : successfully_activated)
+      {
+        RCLCPP_WARN(
+          get_logger(),
+          "Deactivating component '%s' in group '%s' due to group activation failure.",
+          activated_component.c_str(), group_name.c_str());
+        if (
+          resource_manager_->set_component_state(activated_component, inactive_state) ==
+          hardware_interface::return_type::ERROR)
+        {
+          RCLCPP_ERROR(
+            get_logger(),
+            "Failed to deactivate component '%s' during rollback. Component may be in an "
+            "inconsistent state.",
+            activated_component.c_str());
+        }
+      }
+      RCLCPP_ERROR(
+        get_logger(),
+        "Group '%s' failed during activation phase. All components in the group have been "
+        "deactivated.",
+        group_name.c_str());
+    }
   }
+
+  // Process ungrouped components individually (configure and activate each one)
+  for (const auto & component_name : ungrouped_components)
+  {
+    RCLCPP_INFO(get_logger(), "Activating component '%s'.", component_name.c_str());
+    if (set_component_state_with_error_handling(component_name, active_state))
+    {
+      RCLCPP_DEBUG(get_logger(), "Successfully activated component '%s'.", component_name.c_str());
+    }
+  }
+
   if (robot_description_notification_timer_)
   {
     robot_description_notification_timer_->cancel();
@@ -1193,7 +1328,7 @@ controller_interface::ControllerInterfaceBaseSharedPtr ControllerManager::load_c
   std::vector<std::string> fallback_controllers;
   if (!has_parameter(fallback_ctrl_param))
   {
-    declare_parameter(fallback_ctrl_param, rclcpp::ParameterType::PARAMETER_STRING_ARRAY);
+    declare_parameter(fallback_ctrl_param, std::vector<std::string>{});
   }
   if (get_parameter(fallback_ctrl_param, fallback_controllers) && !fallback_controllers.empty())
   {
@@ -1214,7 +1349,7 @@ controller_interface::ControllerInterfaceBaseSharedPtr ControllerManager::load_c
   std::vector<std::string> node_options_args;
   if (!has_parameter(node_options_args_param))
   {
-    declare_parameter(node_options_args_param, rclcpp::ParameterType::PARAMETER_STRING_ARRAY);
+    declare_parameter(node_options_args_param, std::vector<std::string>{});
   }
   if (get_parameter(node_options_args_param, node_options_args) && !node_options_args.empty())
   {
@@ -1540,12 +1675,13 @@ controller_interface::return_type ControllerManager::configure_controller(
       ref_interfaces = controller->export_reference_interfaces();
       if (ref_interfaces.empty() && state_interfaces.empty())
       {
-        // TODO(destogl): Add test for this!
         RCLCPP_ERROR(
           get_logger(),
           "Controller '%s' is chainable, but does not export any state or reference interfaces. "
-          "Did you override the on_export_method() correctly?",
+          "Did you override the on_export_state_interfaces_list() or "
+          "on_export_reference_interfaces_list() methods correctly?",
           controller_name.c_str());
+        cleanup_controller(*found_it);
         return controller_interface::return_type::ERROR;
       }
     }
@@ -1555,6 +1691,7 @@ controller_interface::return_type ControllerManager::configure_controller(
         get_logger(), "Export of the state or reference interfaces failed with following error: %s",
         e.what());
       params_->handle_exceptions ? void() : throw;
+      cleanup_controller(*found_it);
       return controller_interface::return_type::ERROR;
     }
     resource_manager_->import_controller_reference_interfaces(controller_name, ref_interfaces);
@@ -1672,6 +1809,7 @@ controller_interface::return_type ControllerManager::configure_controller(
 void ControllerManager::clear_requests()
 {
   switch_params_.do_switch = false;
+  switch_params_.ready_to_switch = false;
   switch_params_.activate_asap = false;
   switch_params_.deactivate_request.clear();
   switch_params_.activate_request.clear();
@@ -2216,6 +2354,7 @@ controller_interface::return_type ControllerManager::switch_controller_cb(
   {
     switch_params_.timeout = timeout.to_chrono<std::chrono::nanoseconds>();
   }
+  switch_params_.ready_to_switch.store(false, std::memory_order_release);
   switch_params_.do_switch = true;
   // wait until switch is finished
   if (switch_params_.activate_asap)
@@ -2236,6 +2375,21 @@ controller_interface::return_type ControllerManager::switch_controller_cb(
   }
   else
   {
+    const auto deadline = std::chrono::steady_clock::now() + switch_params_.timeout;
+    while (!switch_params_.ready_to_switch.load(std::memory_order_acquire))
+    {
+      if (std::chrono::steady_clock::now() >= deadline)
+      {
+        message = fmt::format(
+          FMT_COMPILE("Switch controller timed out after {} seconds!"),
+          static_cast<double>(switch_params_.timeout.count()) / 1e9);
+        RCLCPP_ERROR(get_logger(), "%s", message.c_str());
+        clear_requests();
+        return controller_interface::return_type::ERROR;
+      }
+      // wait for the realtime loop to be ready for switching controllers
+      std::this_thread::yield();
+    }
     RCLCPP_INFO(get_logger(), "Requested controller switch from non-realtime loop");
     // This should work as the realtime thread operation is read-only operation
     manage_switch();
@@ -3351,7 +3505,7 @@ controller_interface::return_type ControllerManager::update(
       {
         for (const auto & fallback_controller : ctrl_it->info.fallback_controllers_names)
         {
-          rt_buffer_.fallback_controllers_list.push_back(fallback_controller);
+          ros2_control::add_item(rt_buffer_.fallback_controllers_list, fallback_controller);
           get_active_controllers_using_command_interfaces_of_controller(
             fallback_controller, rt_controller_list,
             rt_buffer_.activate_controllers_using_interfaces_list, resource_manager_);
@@ -3394,9 +3548,16 @@ controller_interface::return_type ControllerManager::update(
   resource_manager_->enforce_command_limits(period);
 
   // there are controllers to (de)activate
-  if (switch_params_.do_switch && switch_params_.activate_asap)
+  if (switch_params_.do_switch)
   {
-    manage_switch();
+    if (switch_params_.activate_asap)
+    {
+      manage_switch();
+    }
+    else
+    {
+      switch_params_.ready_to_switch.store(true, std::memory_order_release);
+    }
   }
 
   PUBLISH_ROS2_CONTROL_INTROSPECTION_DATA_ASYNC(hardware_interface::DEFAULT_REGISTRY_KEY);

@@ -2,6 +2,28 @@
 Changelog for package hardware_interface_testing
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+4.45.2 (2026-05-12)
+-------------------
+* Fix pre-commit of ament_cppcheck on rolling Resolute Raccoon (`#3276 <https://github.com/ros-controls/ros2_control/issues/3276>`_) (`#3277 <https://github.com/ros-controls/ros2_control/issues/3277>`_)
+* Add tests for duplicate prevention (fixes `#2952 <https://github.com/ros-controls/ros2_control/issues/2952>`_) (`#3189 <https://github.com/ros-controls/ros2_control/issues/3189>`_) (`#3262 <https://github.com/ros-controls/ros2_control/issues/3262>`_)
+* Contributors: mergify[bot]
+
+4.45.1 (2026-04-24)
+-------------------
+
+4.45.0 (2026-04-17)
+-------------------
+* Fix RCLCPP_VERSION_GTE for add_node (backport `#3198 <https://github.com/ros-controls/ros2_control/issues/3198>`_) (`#3200 <https://github.com/ros-controls/ros2_control/issues/3200>`_)
+* Fix API breaking change of Executor::add_node (backport `#3080 <https://github.com/ros-controls/ros2_control/issues/3080>`_) (`#3190 <https://github.com/ros-controls/ros2_control/issues/3190>`_)
+* Contributors: mergify[bot]
+
+4.44.0 (2026-04-02)
+-------------------
+* Fix forwarding handle_exceptions parameter to resource manager (`#3107 <https://github.com/ros-controls/ros2_control/issues/3107>`_) (`#3117 <https://github.com/ros-controls/ros2_control/issues/3117>`_)
+* Consistently add <cmath> include with define for windows (backport `#3061 <https://github.com/ros-controls/ros2_control/issues/3061>`_) (`#3066 <https://github.com/ros-controls/ros2_control/issues/3066>`_)
+* Bump version of pre-commit hooks (`#3055 <https://github.com/ros-controls/ros2_control/issues/3055>`_) (`#3057 <https://github.com/ros-controls/ros2_control/issues/3057>`_)
+* Contributors: mergify[bot]
+
 4.43.0 (2026-02-03)
 -------------------
 

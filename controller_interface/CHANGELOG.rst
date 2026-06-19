@@ -2,6 +2,25 @@
 Changelog for package controller_interface
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+4.45.2 (2026-05-12)
+-------------------
+* Fix the out of bound access of the std::vector in ChainableController (backport `#3287 <https://github.com/ros-controls/ros2_control/issues/3287>`_) (`#3288 <https://github.com/ros-controls/ros2_control/issues/3288>`_)
+* Contributors: mergify[bot]
+
+4.45.1 (2026-04-24)
+-------------------
+
+4.45.0 (2026-04-17)
+-------------------
+* Add test_utils file for transition tests (backport `#3048 <https://github.com/ros-controls/ros2_control/issues/3048>`_) (`#3216 <https://github.com/ros-controls/ros2_control/issues/3216>`_)
+* Contributors: mergify[bot]
+
+4.44.0 (2026-04-02)
+-------------------
+* Add pal_statistics as explicit dependency (`#3163 <https://github.com/ros-controls/ros2_control/issues/3163>`_) (`#3167 <https://github.com/ros-controls/ros2_control/issues/3167>`_)
+* Add new API for chainable controller interface exporting (backport `#2988 <https://github.com/ros-controls/ros2_control/issues/2988>`_) (`#3050 <https://github.com/ros-controls/ros2_control/issues/3050>`_)
+* Contributors: mergify[bot]
+
 4.43.0 (2026-02-03)
 -------------------
 

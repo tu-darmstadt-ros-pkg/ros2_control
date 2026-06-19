@@ -2,6 +2,22 @@
 Changelog for package transmission_interface
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+4.45.2 (2026-05-12)
+-------------------
+
+4.45.1 (2026-04-24)
+-------------------
+
+4.45.0 (2026-04-17)
+-------------------
+* Unify transmission tests using shared minimal robot URDF in test assets (backport `#3031 <https://github.com/ros-controls/ros2_control/issues/3031>`_) (`#3217 <https://github.com/ros-controls/ros2_control/issues/3217>`_)
+* Contributors: mergify[bot]
+
+4.44.0 (2026-04-02)
+-------------------
+* Export information of supported interfaces from transmissions (`#3049 <https://github.com/ros-controls/ros2_control/issues/3049>`_) (`#3155 <https://github.com/ros-controls/ros2_control/issues/3155>`_)
+* Contributors: mergify[bot]
+
 4.43.0 (2026-02-03)
 -------------------
 

@@ -148,6 +148,7 @@ if(BUILD_TESTING)
     controller_manager
     test_controller
     test_controller_failed_init
+    test_chainable_controller
     ros2_control_test_assets::ros2_control_test_assets
   )
 
@@ -234,6 +235,19 @@ if(BUILD_TESTING)
   )
   target_compile_definitions(
     test_spawner_unspawner
+    PRIVATE PARAMETERS_FILE_PATH="${CMAKE_CURRENT_LIST_DIR}/test/")
+
+  ament_add_gmock(test_advanced_spawner
+    test/test_advanced_spawner.cpp
+    TIMEOUT 180
+  )
+  target_link_libraries(test_advanced_spawner
+    controller_manager
+    test_controller
+    ros2_control_test_assets::ros2_control_test_assets
+  )
+  target_compile_definitions(
+    test_advanced_spawner
     PRIVATE PARAMETERS_FILE_PATH="${CMAKE_CURRENT_LIST_DIR}/test/")
 
   ament_add_gmock(test_hardware_spawner

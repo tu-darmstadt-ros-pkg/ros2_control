@@ -2,6 +2,30 @@
 Changelog for package hardware_interface
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+4.45.2 (2026-05-12)
+-------------------
+* fix(generic_system): Fix loop bound of states (`#3282 <https://github.com/ros-controls/ros2_control/issues/3282>`_) (`#3285 <https://github.com/ros-controls/ros2_control/issues/3285>`_)
+* Fix pre-commit of ament_cppcheck on rolling Resolute Raccoon (`#3276 <https://github.com/ros-controls/ros2_control/issues/3276>`_) (`#3277 <https://github.com/ros-controls/ros2_control/issues/3277>`_)
+* Contributors: mergify[bot]
+
+4.45.1 (2026-04-24)
+-------------------
+* Fix C++20 behavior changes of `std::from_chars` (`#3244 <https://github.com/ros-controls/ros2_control/issues/3244>`_) (`#3247 <https://github.com/ros-controls/ros2_control/issues/3247>`_)
+* Add missing `charconv` header (`#3234 <https://github.com/ros-controls/ros2_control/issues/3234>`_) (`#3236 <https://github.com/ros-controls/ros2_control/issues/3236>`_)
+* Contributors: mergify[bot]
+
+4.45.0 (2026-04-17)
+-------------------
+* lexical_casts: use gMock instead of gTest (`#3204 <https://github.com/ros-controls/ros2_control/issues/3204>`_) (`#3205 <https://github.com/ros-controls/ros2_control/issues/3205>`_)
+* Contributors: mergify[bot]
+
+4.44.0 (2026-04-02)
+-------------------
+* fix(hardware_interface): include component name in parsing error messages (`#3144 <https://github.com/ros-controls/ros2_control/issues/3144>`_) (`#3161 <https://github.com/ros-controls/ros2_control/issues/3161>`_)
+* Consistently add <cmath> include with define for windows (backport `#3061 <https://github.com/ros-controls/ros2_control/issues/3061>`_) (`#3066 <https://github.com/ros-controls/ros2_control/issues/3066>`_)
+* Cache interface name to avoid failing at the destruction time (backport `#3043 <https://github.com/ros-controls/ros2_control/issues/3043>`_) (`#3047 <https://github.com/ros-controls/ros2_control/issues/3047>`_)
+* Contributors: mergify[bot]
+
 4.43.0 (2026-02-03)
 -------------------
 * Fix the node name overlapping in the Hardware Components (`#3006 <https://github.com/ros-controls/ros2_control/issues/3006>`_) (`#3014 <https://github.com/ros-controls/ros2_control/issues/3014>`_)
