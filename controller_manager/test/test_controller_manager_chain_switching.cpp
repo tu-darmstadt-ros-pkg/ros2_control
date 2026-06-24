@@ -1,4 +1,4 @@
-// Copyright 2025 Hector Team
+// Copyright 2025 Team Hector
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -73,6 +73,25 @@ class TestableControllerManager : public controller_manager::ControllerManager
   FRIEND_TEST(TestChainSwitching, force_auto_odom_survives_when_chain_stays);
   FRIEND_TEST(TestChainSwitching, force_auto_rejects_impossible_combination);
   FRIEND_TEST(TestChainSwitching, force_auto_rejects_state_cmd_conflict);
+  FRIEND_TEST(
+    TestChainSwitching, force_auto_does_not_deactivate_state_only_provider_of_conflict_candidate);
+  FRIEND_TEST(
+    TestChainSwitching,
+    force_auto_explicit_deactivate_state_provider_propagates_to_dependents);
+  FRIEND_TEST(
+    TestChainSwitching,
+    auto_explicit_deactivate_state_provider_requires_complete_stop_list);
+  FRIEND_TEST(
+    TestChainSwitching,
+    auto_or_force_auto_rejects_dependency_also_explicitly_deactivated);
+  FRIEND_TEST(
+    TestChainSwitching,
+    auto_explicit_deactivate_missing_only_state_consumer_fails);
+  FRIEND_TEST(
+    TestChainSwitching,
+    auto_explicit_deactivate_complete_stop_list_succeeds);
+  FRIEND_TEST(TestChainSwitching, auto_noop_when_requested_graph_already_active);
+  FRIEND_TEST(TestChainSwitching, force_auto_noop_when_requested_graph_already_active);
 
 public:
   TestableControllerManager(
@@ -682,6 +701,364 @@ TEST_P(TestChainSwitching, force_auto_rejects_state_cmd_conflict)
 
   ExpectInactive(ODOM_PUBLISHER);
   ExpectInactive(VELOCITY_CMD);
+}
+
+// =============================================================================
+// Proposed test: state-provider isolation under FORCE_AUTO
+// =============================================================================
+
+// Documentation contract (SwitchController.srv):
+//   FORCE_AUTO "will deactivate any controllers that BLOCK THE ACTIVATION of
+//   the requested controller, following the MUTUALLY EXCLUSIVE JOINT INTERFACE
+//   SWITCHING PRINCIPLE."
+//
+// A controller that only provides state to a conflict candidate does NOT block
+// activation through any command interface.  FORCE_AUTO must not deactivate it.
+//
+// Topology:
+//   state_filter ──state──→ wheel_left/position (HW state, not used by PID chain)
+//   state_filter exports state "sig"
+//   sig_consumer reads state_filter/sig  AND commands wheel_left/velocity
+//                (the latter conflicts with pid_left)
+//
+//   Build:   controller_chain_spec_[sig_consumer].preceding_controllers
+//            contains state_filter (via the state-interface path in
+//            build_controllers_topology_info lines ~5109-5110).
+//
+// When FORCE_AUTO activates pid_left (or anything that needs wheel_left/velocity):
+//   - sig_consumer is a conflict candidate → added to deactivate list.
+//   - The FORCE_AUTO expansion loop walks sig_consumer.preceding_controllers.
+//   - BUG: state_filter is in that list, so it is incorrectly deactivated.
+//   - CORRECT behaviour per doc: state_filter does not hold any interface that
+//     blocks activation → it must remain active.
+//
+// This test will PASS once the FORCE_AUTO walk is restricted to command-chain
+// predecessors only (from controller_chained_reference_interfaces_cache_)
+// instead of the mixed preceding_controllers list.
+TEST_P(
+  TestChainSwitching,
+  force_auto_does_not_deactivate_state_only_provider_of_conflict_candidate)
+{
+  static constexpr char STATE_FILTER[] = "state_filter_ctrl";
+  static constexpr char SIG_CONSUMER[] = "sig_consumer_ctrl";
+
+  // state_filter: chainable, reads wheel_left/position (state-only HW interface)
+  // and exports a state interface "sig".  No command interfaces — pure state
+  // processor.  Does NOT conflict with pid_left.
+  auto state_filter = std::make_shared<test_chainable_controller::TestChainableController>();
+  state_filter->set_command_interface_configuration(
+    {controller_interface::interface_configuration_type::NONE, {}});
+  state_filter->set_state_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL, {"wheel_left/position"}});
+  state_filter->set_reference_interface_names({});
+  state_filter->set_exported_state_interface_names({"sig"});
+
+  // sig_consumer: reads state_filter/sig AND commands wheel_left/velocity —
+  // the command interface conflicts with pid_left.
+  auto sig_consumer = std::make_shared<test_controller::TestController>();
+  sig_consumer->set_command_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL, {"wheel_left/velocity"}});
+  sig_consumer->set_state_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL,
+     {std::string(STATE_FILTER) + "/sig"}});
+
+  // Add and configure ALL controllers before any executor activity.
+  // add_controller() must not be called while the executor is already spinning.
+  SetupNStructureControllers();
+  AddAllControllers();
+  cm_->add_controller(
+    state_filter, STATE_FILTER, test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    sig_consumer, SIG_CONSUMER, test_controller::TEST_CONTROLLER_CLASS_NAME);
+
+  {
+    ControllerManagerRunner<TestableControllerManager> cm_runner(this);
+    for (const auto & name :
+         {PID_LEFT, PID_RIGHT, DIFF_DRIVE, POSITION_TRACKING, VELOCITY_CMD, ODOM_PUBLISHER,
+          STATE_FILTER, SIG_CONSUMER})
+    {
+      ASSERT_EQ(controller_interface::return_type::OK, cm_->configure_controller(name))
+        << "Failed to configure " << name;
+    }
+  }
+
+  // Activate state_filter first so its exported state "sig" becomes available.
+  switch_test_controllers({STATE_FILTER}, {}, STRICT);
+  // Activate sig_consumer: it reads state_filter/sig (now available) and
+  // commands wheel_left/velocity (conflict with pid_left).
+  switch_test_controllers({SIG_CONSUMER}, {}, STRICT);
+
+  ExpectActive(STATE_FILTER);
+  ExpectActive(SIG_CONSUMER);
+
+  // FORCE_AUTO activate pid_left: wheel_left/velocity is held by sig_consumer →
+  // sig_consumer must be deactivated.
+  // state_filter only provides state to sig_consumer; it holds no conflicting
+  // command interface → per the doc it must NOT be deactivated.
+  // Bug: preceding_controllers[sig_consumer] contains state_filter (state path),
+  // so the FORCE_AUTO walk incorrectly adds state_filter to the deactivate list.
+  switch_test_controllers({PID_LEFT}, {}, FORCE_AUTO);
+
+  ExpectActive(PID_LEFT);
+  ExpectInactive(SIG_CONSUMER);  // correctly stopped — held conflicting interface
+  ExpectActive(STATE_FILTER);    // must survive — state-only provider, not a blocker
+}
+
+// =============================================================================
+// Regression tests for bugs found during review
+// =============================================================================
+
+// Bug: Step 4 early-continue skips upstream propagation when a controller is
+// already in the user-supplied deactivate list.
+//
+// Topology: position_tracking ──cmd──→ diff_drive ──cmd──→ pid_left/pid_right
+// velocity_cmd also commands pid_left/pid_right.
+//
+// Active state: full diff_drive chain (position_tracking + diff_drive + PIDs).
+// User request: activate=[velocity_cmd], deactivate=[diff_drive] (explicit).
+//
+// FORCE_AUTO must recognise that position_tracking depends on diff_drive and
+// auto-add position_tracking to the deactivate list even though diff_drive is
+// already explicitly listed.  Without the fix, the early-continue in the
+// FORCE_AUTO expansion loop skips diff_drive (already in deactivate_request),
+// so position_tracking is never enqueued and ends up active while its command
+// target (diff_drive) is gone.
+TEST_P(TestChainSwitching, force_auto_propagates_through_explicit_deactivate_entry)
+{
+  PrepareAllControllers();
+  ActivateDiffDriveChainBottomUp();
+
+  // User explicitly lists diff_drive for deactivation; velocity_cmd should
+  // activate and the whole upstream of diff_drive must be cleaned up.
+  switch_test_controllers({VELOCITY_CMD}, {DIFF_DRIVE}, FORCE_AUTO);
+
+  ExpectActive(PID_LEFT);
+  ExpectActive(PID_RIGHT);
+  ExpectInactive(DIFF_DRIVE);
+  ExpectInactive(POSITION_TRACKING);
+  ExpectActive(VELOCITY_CMD);
+}
+
+// Bug: propagate_deactivation_of_chained_mode uses `break` instead of
+// `continue` when it encounters an inactive controller in the deactivate list.
+// This aborts the whole pass, so a subsequent active controller in the list
+// never gets its followers added to from_chained_mode_request.
+//
+// Expose this by including an already-inactive controller in the explicit stop
+// list alongside diff_drive which is active and chainable.  Without the fix,
+// diff_drive's followers (pid_left, pid_right) are not switched out of chained
+// mode and the switch fails or leaves the system in an inconsistent state.
+TEST_P(TestChainSwitching, deactivate_active_controller_after_inactive_one_in_list)
+{
+  PrepareAllControllers();
+  // Only diff_drive and its PIDs are active; position_tracking stays inactive.
+  switch_test_controllers({PID_LEFT, PID_RIGHT}, {}, STRICT);
+  switch_test_controllers({DIFF_DRIVE}, {}, STRICT);
+
+  // Stop list: position_tracking (already inactive) first, then diff_drive
+  // (active + chainable).  With the break→continue fix, BEST_EFFORT prunes
+  // position_tracking and still processes diff_drive, switching the PIDs out
+  // of chained mode.  Without the fix, the break exits after position_tracking
+  // and diff_drive's followers never get added to from_chained_mode_request,
+  // causing the subsequent STRICT activation of diff_drive to fail.
+  switch_test_controllers({}, {POSITION_TRACKING, DIFF_DRIVE}, BEST_EFFORT);
+
+  ExpectInactive(POSITION_TRACKING);
+  ExpectInactive(DIFF_DRIVE);
+  // PIDs should have left chained mode; they remain active and are usable.
+  ExpectActive(PID_LEFT);
+  ExpectActive(PID_RIGHT);
+
+  // Prove that PIDs actually left chained mode: re-activate diff_drive with STRICT.
+  // If the break→continue bug were present, pid_left/pid_right would still be in
+  // chained mode and diff_drive activation would fail because it could not re-claim
+  // their reference interfaces.
+  switch_test_controllers({DIFF_DRIVE}, {}, STRICT);
+  ExpectActive(DIFF_DRIVE);
+}
+
+// FORCE_AUTO must deactivate state consumers of a disappearing controller.
+// odom_publisher reads diff_drive's exported state; when FORCE_AUTO deactivates
+// diff_drive (conflict with velocity_cmd), odom_publisher's state source
+// disappears and it must also be stopped.  This is handled via
+// controller_chained_state_interfaces_cache_ (not preceding_controllers).
+//
+// Topology:
+//   odom_publisher ──state──→ diff_drive
+//   velocity_cmd   ──cmd───→ pid_left/pid_right (conflicts with diff_drive)
+//
+// Note: this covers the state-consumer deactivation path.  For the
+// complementary case (a state-only *provider* of a conflict candidate must
+// NOT be deactivated) see force_auto_does_not_deactivate_state_only_provider_of_conflict_candidate.
+TEST_P(TestChainSwitching, force_auto_does_not_deactivate_unrelated_state_provider)
+{
+  PrepareAllControllers();
+  ActivateDiffDriveChainBottomUp();
+  switch_test_controllers({ODOM_PUBLISHER}, {}, STRICT);
+
+  // Switch to velocity_cmd: diff_drive and its upstream (position_tracking)
+  // must be deactivated; odom_publisher must be deactivated because its state
+  // source (diff_drive) disappears.  PIDs and velocity_cmd should be active.
+  switch_test_controllers({VELOCITY_CMD}, {}, FORCE_AUTO);
+
+  ExpectActive(PID_LEFT);
+  ExpectActive(PID_RIGHT);
+  ExpectInactive(DIFF_DRIVE);
+  ExpectInactive(POSITION_TRACKING);
+  ExpectInactive(ODOM_PUBLISHER);
+  ExpectActive(VELOCITY_CMD);
+}
+
+// When FORCE_AUTO is given an explicit deactivate=[DIFF_DRIVE], it must still
+// propagate and stop everything that depended on diff_drive:
+//   - position_tracking (command-chain predecessor of diff_drive)
+//   - odom_publisher (state consumer of diff_drive)
+// The PIDs are not in the conflict path and must remain active.
+TEST_P(TestChainSwitching, force_auto_explicit_deactivate_state_provider_propagates_to_dependents)
+{
+  PrepareAllControllers();
+  ActivateDiffDriveChainBottomUp();
+  switch_test_controllers({ODOM_PUBLISHER}, {}, STRICT);
+
+  // User explicitly lists only diff_drive; FORCE_AUTO must auto-stop the rest.
+  switch_test_controllers({}, {DIFF_DRIVE}, FORCE_AUTO);
+
+  ExpectActive(PID_LEFT);
+  ExpectActive(PID_RIGHT);
+  ExpectInactive(DIFF_DRIVE);
+  ExpectInactive(POSITION_TRACKING);  // command-chain predecessor — auto-stopped
+  ExpectInactive(ODOM_PUBLISHER);     // state consumer — auto-stopped
+}
+
+// AUTO must reject a deactivation that would strand a state consumer unless
+// the caller also explicitly lists the consumer for deactivation.
+// Topology: odom_publisher reads diff_drive state.
+// deactivate=[DIFF_DRIVE] without also listing ODOM_PUBLISHER must fail:
+// AUTO converts to STRICT semantics internally, so check_preceding_controllers
+// rejects the deactivation of diff_drive while position_tracking is still active.
+TEST_P(TestChainSwitching, auto_explicit_deactivate_state_provider_requires_complete_stop_list)
+{
+  PrepareAllControllers();
+  ActivateDiffDriveChainBottomUp();
+  switch_test_controllers({ODOM_PUBLISHER}, {}, STRICT);
+
+  // AUTO does not auto-deactivate odom_publisher or position_tracking — the user
+  // must list them.  AUTO converts to STRICT internally, so this always errors.
+  switch_test_controllers(
+    {}, {DIFF_DRIVE}, AUTO, std::future_status::ready,
+    controller_interface::return_type::ERROR);
+
+  // Nothing should have changed.
+  ExpectActive(DIFF_DRIVE);
+  ExpectActive(POSITION_TRACKING);
+  ExpectActive(PID_LEFT);
+  ExpectActive(PID_RIGHT);
+  ExpectActive(ODOM_PUBLISHER);
+}
+
+// Requesting activate=[ODOM_PUBLISHER] while deactivate=[DIFF_DRIVE] in the
+// same call is contradictory: AUTO expansion of ODOM_PUBLISHER needs diff_drive
+// active, but deactivate=[DIFF_DRIVE] removes it.  The call must be rejected.
+TEST_P(
+  TestChainSwitching, auto_or_force_auto_rejects_dependency_also_explicitly_deactivated)
+{
+  PrepareAllControllers();
+
+  // AUTO: expanding odom_publisher pulls in diff_drive, but diff_drive is
+  // explicitly being deactivated in the same call — impossible combination.
+  switch_test_controllers(
+    {ODOM_PUBLISHER}, {DIFF_DRIVE}, AUTO, std::future_status::ready,
+    controller_interface::return_type::ERROR);
+
+  ExpectInactive(ODOM_PUBLISHER);
+  ExpectInactive(DIFF_DRIVE);
+
+  // Same check for FORCE_AUTO.
+  switch_test_controllers(
+    {ODOM_PUBLISHER}, {DIFF_DRIVE}, FORCE_AUTO, std::future_status::ready,
+    controller_interface::return_type::ERROR);
+
+  ExpectInactive(ODOM_PUBLISHER);
+  ExpectInactive(DIFF_DRIVE);
+}
+
+// deactivate=[DIFF_DRIVE, POSITION_TRACKING] while ODOM_PUBLISHER is active must
+// fail because odom_publisher reads diff_drive's exported state — removing
+// diff_drive would strand it.  check_preceding_controllers_for_deactivate
+// enforces this via controller_chained_state_interfaces_cache_.
+// This test isolates the state-consumer enforcement independently of the
+// command-chain enforcement (POSITION_TRACKING is listed, so that path is clear).
+TEST_P(TestChainSwitching, auto_explicit_deactivate_missing_only_state_consumer_fails)
+{
+  PrepareAllControllers();
+  ActivateDiffDriveChainBottomUp();
+  switch_test_controllers({ODOM_PUBLISHER}, {}, STRICT);
+
+  // POSITION_TRACKING is listed so the command-chain check passes for DIFF_DRIVE.
+  // The missing ODOM_PUBLISHER is the only reason this must fail.
+  switch_test_controllers(
+    {}, {DIFF_DRIVE, POSITION_TRACKING}, AUTO, std::future_status::ready,
+    controller_interface::return_type::ERROR);
+
+  ExpectActive(DIFF_DRIVE);
+  ExpectActive(POSITION_TRACKING);
+  ExpectActive(PID_LEFT);
+  ExpectActive(PID_RIGHT);
+  ExpectActive(ODOM_PUBLISHER);
+}
+
+// Positive counterpart: listing all three consumers succeeds and leaves only
+// the PIDs active.
+TEST_P(TestChainSwitching, auto_explicit_deactivate_complete_stop_list_succeeds)
+{
+  PrepareAllControllers();
+  ActivateDiffDriveChainBottomUp();
+  switch_test_controllers({ODOM_PUBLISHER}, {}, STRICT);
+
+  switch_test_controllers({}, {DIFF_DRIVE, POSITION_TRACKING, ODOM_PUBLISHER}, AUTO);
+
+  ExpectActive(PID_LEFT);
+  ExpectActive(PID_RIGHT);
+  ExpectInactive(DIFF_DRIVE);
+  ExpectInactive(POSITION_TRACKING);
+  ExpectInactive(ODOM_PUBLISHER);
+}
+
+// AUTO activate=[POSITION_TRACKING] when the full chain is already active:
+// Step 5 prunes every controller from the activation list (all already active),
+// leaving empty activate and deactivate lists — the switch returns immediately
+// (no update cycle needed) with OK and no state changes.
+TEST_P(TestChainSwitching, auto_noop_when_requested_graph_already_active)
+{
+  PrepareAllControllers();
+  ActivateDiffDriveChainBottomUp();
+
+  switch_test_controllers(
+    {POSITION_TRACKING}, {}, AUTO, std::future_status::ready,
+    controller_interface::return_type::OK);
+
+  ExpectActive(PID_LEFT);
+  ExpectActive(PID_RIGHT);
+  ExpectActive(DIFF_DRIVE);
+  ExpectActive(POSITION_TRACKING);
+}
+
+// Same as above for FORCE_AUTO — its extra deactivation propagation must not
+// incorrectly stop anything when there are no conflicts and the graph is
+// already active.  Also verifies the early-return path works under FORCE_AUTO.
+TEST_P(TestChainSwitching, force_auto_noop_when_requested_graph_already_active)
+{
+  PrepareAllControllers();
+  ActivateDiffDriveChainBottomUp();
+
+  switch_test_controllers(
+    {POSITION_TRACKING}, {}, FORCE_AUTO, std::future_status::ready,
+    controller_interface::return_type::OK);
+
+  ExpectActive(PID_LEFT);
+  ExpectActive(PID_RIGHT);
+  ExpectActive(DIFF_DRIVE);
+  ExpectActive(POSITION_TRACKING);
 }
 
 INSTANTIATE_TEST_SUITE_P(
