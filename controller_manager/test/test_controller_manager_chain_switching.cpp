@@ -76,20 +76,13 @@ class TestableControllerManager : public controller_manager::ControllerManager
   FRIEND_TEST(
     TestChainSwitching, force_auto_does_not_deactivate_state_only_provider_of_conflict_candidate);
   FRIEND_TEST(
-    TestChainSwitching,
-    force_auto_explicit_deactivate_state_provider_propagates_to_dependents);
+    TestChainSwitching, force_auto_explicit_deactivate_state_provider_propagates_to_dependents);
   FRIEND_TEST(
-    TestChainSwitching,
-    auto_explicit_deactivate_state_provider_requires_complete_stop_list);
+    TestChainSwitching, auto_explicit_deactivate_state_provider_requires_complete_stop_list);
   FRIEND_TEST(
-    TestChainSwitching,
-    auto_or_force_auto_rejects_dependency_also_explicitly_deactivated);
-  FRIEND_TEST(
-    TestChainSwitching,
-    auto_explicit_deactivate_missing_only_state_consumer_fails);
-  FRIEND_TEST(
-    TestChainSwitching,
-    auto_explicit_deactivate_complete_stop_list_succeeds);
+    TestChainSwitching, auto_or_force_auto_rejects_dependency_also_explicitly_deactivated);
+  FRIEND_TEST(TestChainSwitching, auto_explicit_deactivate_missing_only_state_consumer_fails);
+  FRIEND_TEST(TestChainSwitching, auto_explicit_deactivate_complete_stop_list_succeeds);
   FRIEND_TEST(TestChainSwitching, auto_noop_when_requested_graph_already_active);
   FRIEND_TEST(TestChainSwitching, force_auto_noop_when_requested_graph_already_active);
 
@@ -106,9 +99,8 @@ public:
   }
 };
 
-class TestChainSwitching
-: public ControllerManagerFixture<TestableControllerManager>,
-  public testing::WithParamInterface<Strictness>
+class TestChainSwitching : public ControllerManagerFixture<TestableControllerManager>,
+                           public testing::WithParamInterface<Strictness>
 {
 public:
   static constexpr char PID_LEFT[] = "pid_left_ctrl";
@@ -118,8 +110,7 @@ public:
   static constexpr char VELOCITY_CMD[] = "velocity_cmd_ctrl";
   static constexpr char ODOM_PUBLISHER[] = "odom_publisher_ctrl";
 
-  static constexpr int32_t AUTO =
-    controller_manager_msgs::srv::SwitchController::Request::AUTO;
+  static constexpr int32_t AUTO = controller_manager_msgs::srv::SwitchController::Request::AUTO;
   static constexpr int32_t FORCE_AUTO =
     controller_manager_msgs::srv::SwitchController::Request::FORCE_AUTO;
 
@@ -131,8 +122,8 @@ public:
       ros2_control_test_assets::diffbot_urdf, velocity_pattern, R"(velocity="10000.0")");
     cm_ = std::make_shared<TestableControllerManager>(
       std::make_unique<hardware_interface::ResourceManager>(
-        diffbot_urdf, rm_node_->get_node_clock_interface(),
-        rm_node_->get_node_logging_interface(), true),
+        diffbot_urdf, rm_node_->get_node_clock_interface(), rm_node_->get_node_logging_interface(),
+        true),
       executor_, TEST_CM_NAME);
     run_updater_ = false;
   }
@@ -186,16 +177,14 @@ public:
 
   void AddAllControllers()
   {
-    cm_->add_controller(
-      pid_left, PID_LEFT, test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+    cm_->add_controller(pid_left, PID_LEFT, test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
     cm_->add_controller(
       pid_right, PID_RIGHT, test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
     cm_->add_controller(
       diff_drive, DIFF_DRIVE, test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
     cm_->add_controller(
       position_tracking, POSITION_TRACKING, test_controller::TEST_CONTROLLER_CLASS_NAME);
-    cm_->add_controller(
-      velocity_cmd, VELOCITY_CMD, test_controller::TEST_CONTROLLER_CLASS_NAME);
+    cm_->add_controller(velocity_cmd, VELOCITY_CMD, test_controller::TEST_CONTROLLER_CLASS_NAME);
     cm_->add_controller(
       odom_publisher, ODOM_PUBLISHER, test_controller::TEST_CONTROLLER_CLASS_NAME);
   }
@@ -214,9 +203,8 @@ public:
   void ExpectState(const std::string & ctrl_name, uint8_t expected_state)
   {
     auto loaded = cm_->get_loaded_controllers();
-    auto it = std::find_if(loaded.begin(), loaded.end(), [&](const auto & spec) {
-      return spec.info.name == ctrl_name;
-    });
+    auto it = std::find_if(
+      loaded.begin(), loaded.end(), [&](const auto & spec) { return spec.info.name == ctrl_name; });
     ASSERT_NE(it, loaded.end()) << "Controller " << ctrl_name << " not found";
     EXPECT_EQ(expected_state, it->c->get_lifecycle_state().id())
       << "Controller " << ctrl_name << " in wrong state";
@@ -313,8 +301,7 @@ TEST_P(TestChainSwitching, atomic_switch_diff_drive_to_velocity_cmd)
   PrepareAllControllers();
   ActivateDiffDriveChainBottomUp();
 
-  switch_test_controllers(
-    {VELOCITY_CMD}, {POSITION_TRACKING, DIFF_DRIVE}, GetParam().strictness);
+  switch_test_controllers({VELOCITY_CMD}, {POSITION_TRACKING, DIFF_DRIVE}, GetParam().strictness);
 
   ExpectActive(PID_LEFT);
   ExpectActive(PID_RIGHT);
@@ -329,8 +316,7 @@ TEST_P(TestChainSwitching, atomic_switch_velocity_cmd_to_diff_drive)
   PrepareAllControllers();
   ActivateVelocityCmdChainBottomUp();
 
-  switch_test_controllers(
-    {DIFF_DRIVE, POSITION_TRACKING}, {VELOCITY_CMD}, GetParam().strictness);
+  switch_test_controllers({DIFF_DRIVE, POSITION_TRACKING}, {VELOCITY_CMD}, GetParam().strictness);
 
   ExpectActive(PID_LEFT);
   ExpectActive(PID_RIGHT);
@@ -465,8 +451,8 @@ TEST_P(TestChainSwitching, auto_fails_on_conflict)
   ActivateVelocityCmdChainBottomUp();
 
   switch_test_controllers(
-    {POSITION_TRACKING}, {}, AUTO,
-    std::future_status::ready, controller_interface::return_type::ERROR);
+    {POSITION_TRACKING}, {}, AUTO, std::future_status::ready,
+    controller_interface::return_type::ERROR);
 
   ExpectActive(PID_LEFT);
   ExpectActive(PID_RIGHT);
@@ -482,8 +468,8 @@ TEST_P(TestChainSwitching, auto_fails_on_state_provider_conflict)
   ActivateVelocityCmdChainBottomUp();
 
   switch_test_controllers(
-    {ODOM_PUBLISHER}, {}, AUTO,
-    std::future_status::ready, controller_interface::return_type::ERROR);
+    {ODOM_PUBLISHER}, {}, AUTO, std::future_status::ready,
+    controller_interface::return_type::ERROR);
 
   ExpectActive(PID_LEFT);
   ExpectActive(PID_RIGHT);
@@ -498,8 +484,8 @@ TEST_P(TestChainSwitching, auto_rejects_impossible_combination)
   PrepareAllControllers();
 
   switch_test_controllers(
-    {DIFF_DRIVE, VELOCITY_CMD}, {}, AUTO,
-    std::future_status::ready, controller_interface::return_type::ERROR);
+    {DIFF_DRIVE, VELOCITY_CMD}, {}, AUTO, std::future_status::ready,
+    controller_interface::return_type::ERROR);
 
   ExpectInactive(DIFF_DRIVE);
   ExpectInactive(VELOCITY_CMD);
@@ -511,8 +497,8 @@ TEST_P(TestChainSwitching, auto_rejects_state_cmd_conflict)
   PrepareAllControllers();
 
   switch_test_controllers(
-    {ODOM_PUBLISHER, VELOCITY_CMD}, {}, AUTO,
-    std::future_status::ready, controller_interface::return_type::ERROR);
+    {ODOM_PUBLISHER, VELOCITY_CMD}, {}, AUTO, std::future_status::ready,
+    controller_interface::return_type::ERROR);
 
   ExpectInactive(ODOM_PUBLISHER);
   ExpectInactive(VELOCITY_CMD);
@@ -683,8 +669,8 @@ TEST_P(TestChainSwitching, force_auto_rejects_impossible_combination)
   PrepareAllControllers();
 
   switch_test_controllers(
-    {DIFF_DRIVE, VELOCITY_CMD}, {}, FORCE_AUTO,
-    std::future_status::ready, controller_interface::return_type::ERROR);
+    {DIFF_DRIVE, VELOCITY_CMD}, {}, FORCE_AUTO, std::future_status::ready,
+    controller_interface::return_type::ERROR);
 
   ExpectInactive(DIFF_DRIVE);
   ExpectInactive(VELOCITY_CMD);
@@ -696,8 +682,8 @@ TEST_P(TestChainSwitching, force_auto_rejects_state_cmd_conflict)
   PrepareAllControllers();
 
   switch_test_controllers(
-    {ODOM_PUBLISHER, VELOCITY_CMD}, {}, FORCE_AUTO,
-    std::future_status::ready, controller_interface::return_type::ERROR);
+    {ODOM_PUBLISHER, VELOCITY_CMD}, {}, FORCE_AUTO, std::future_status::ready,
+    controller_interface::return_type::ERROR);
 
   ExpectInactive(ODOM_PUBLISHER);
   ExpectInactive(VELOCITY_CMD);
@@ -735,9 +721,7 @@ TEST_P(TestChainSwitching, force_auto_rejects_state_cmd_conflict)
 // This test will PASS once the FORCE_AUTO walk is restricted to command-chain
 // predecessors only (from controller_chained_reference_interfaces_cache_)
 // instead of the mixed preceding_controllers list.
-TEST_P(
-  TestChainSwitching,
-  force_auto_does_not_deactivate_state_only_provider_of_conflict_candidate)
+TEST_P(TestChainSwitching, force_auto_does_not_deactivate_state_only_provider_of_conflict_candidate)
 {
   static constexpr char STATE_FILTER[] = "state_filter_ctrl";
   static constexpr char SIG_CONSUMER[] = "sig_consumer_ctrl";
@@ -768,8 +752,7 @@ TEST_P(
   AddAllControllers();
   cm_->add_controller(
     state_filter, STATE_FILTER, test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
-  cm_->add_controller(
-    sig_consumer, SIG_CONSUMER, test_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(sig_consumer, SIG_CONSUMER, test_controller::TEST_CONTROLLER_CLASS_NAME);
 
   {
     ControllerManagerRunner<TestableControllerManager> cm_runner(this);
@@ -945,8 +928,7 @@ TEST_P(TestChainSwitching, auto_explicit_deactivate_state_provider_requires_comp
   // AUTO does not auto-deactivate odom_publisher or position_tracking — the user
   // must list them.  AUTO converts to STRICT internally, so this always errors.
   switch_test_controllers(
-    {}, {DIFF_DRIVE}, AUTO, std::future_status::ready,
-    controller_interface::return_type::ERROR);
+    {}, {DIFF_DRIVE}, AUTO, std::future_status::ready, controller_interface::return_type::ERROR);
 
   // Nothing should have changed.
   ExpectActive(DIFF_DRIVE);
@@ -959,8 +941,7 @@ TEST_P(TestChainSwitching, auto_explicit_deactivate_state_provider_requires_comp
 // Requesting activate=[ODOM_PUBLISHER] while deactivate=[DIFF_DRIVE] in the
 // same call is contradictory: AUTO expansion of ODOM_PUBLISHER needs diff_drive
 // active, but deactivate=[DIFF_DRIVE] removes it.  The call must be rejected.
-TEST_P(
-  TestChainSwitching, auto_or_force_auto_rejects_dependency_also_explicitly_deactivated)
+TEST_P(TestChainSwitching, auto_or_force_auto_rejects_dependency_also_explicitly_deactivated)
 {
   PrepareAllControllers();
 
