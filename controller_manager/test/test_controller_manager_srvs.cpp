@@ -35,6 +35,7 @@ using ::testing::UnorderedElementsAre;
 
 using ListControllers = controller_manager_msgs::srv::ListControllers;
 using ListHardwareInterfaces = controller_manager_msgs::srv::ListHardwareInterfaces;
+using SwitchController = controller_manager_msgs::srv::SwitchController;
 using TestController = test_controller::TestController;
 using TestChainableController = test_chainable_controller::TestChainableController;
 
@@ -2156,6 +2157,152 @@ TEST_F(TestControllerManagerSrvs, activate_chained_controllers_all_at_once)
   ASSERT_EQ(res, controller_interface::return_type::OK);
 
   RCLCPP_ERROR(srv_node->get_logger(), "Check successful!");
+}
+
+namespace
+{
+constexpr char CHAIN_TIP_NAME[] = "chain_tip_controller";
+constexpr char CHAIN_RIVAL_NAME[] = "chain_rival_controller";
+
+// Topology for the AUTO / FORCE_AUTO service tests:
+//
+//   chain_tip ──cmd──→ test_chainable_controller_name ──cmd──→ joint1/position
+//   chain_rival ───────cmd──────────────────────────────────→ joint1/position
+//
+// chain_tip cannot run without the chainable controller, and the chainable controller cannot run
+// while chain_rival holds joint1/position. That is enough to exercise both dependency expansion
+// and conflict handling.
+struct ChainControllers
+{
+  std::shared_ptr<TestChainableController> chained;
+  std::shared_ptr<TestController> tip;
+  std::shared_ptr<TestController> rival;
+};
+
+ChainControllers setup_chain_controllers(controller_manager::ControllerManager & cm)
+{
+  ChainControllers chain;
+
+  chain.chained = std::make_shared<TestChainableController>();
+  chain.chained->set_command_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL, {"joint1/position"}});
+  chain.chained->set_state_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL, {"joint1/position"}});
+  chain.chained->set_reference_interface_names({"joint1/position"});
+
+  chain.tip = std::make_shared<TestController>();
+  chain.tip->set_command_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL,
+     {std::string(test_chainable_controller::TEST_CONTROLLER_NAME) + "/joint1/position"}});
+
+  chain.rival = std::make_shared<TestController>();
+  chain.rival->set_command_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL, {"joint1/position"}});
+
+  cm.add_controller(
+    chain.chained, test_chainable_controller::TEST_CONTROLLER_NAME,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm.add_controller(chain.tip, CHAIN_TIP_NAME, test_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm.add_controller(chain.rival, CHAIN_RIVAL_NAME, test_controller::TEST_CONTROLLER_CLASS_NAME);
+
+  for (const auto & name :
+       {std::string(test_chainable_controller::TEST_CONTROLLER_NAME), std::string(CHAIN_TIP_NAME),
+        std::string(CHAIN_RIVAL_NAME)})
+  {
+    EXPECT_EQ(controller_interface::return_type::OK, cm.configure_controller(name))
+      << "Failed to configure " << name;
+  }
+  return chain;
+}
+
+std::string controller_state(
+  controller_manager::ControllerManager & cm, const std::string & controller_name)
+{
+  const auto controllers = cm.get_loaded_controllers();
+  auto it = std::find_if(
+    controllers.begin(), controllers.end(),
+    [&controller_name](const auto & spec) { return spec.info.name == controller_name; });
+  return it == controllers.end() ? "not_loaded" : it->c->get_lifecycle_state().label();
+}
+}  // namespace
+
+// Requesting only the tip of a chain over the service activates its dependency as well.
+TEST_F(TestControllerManagerSrvs, switch_controller_srv_auto_expands_chain)
+{
+  rclcpp::executors::SingleThreadedExecutor srv_executor;
+  rclcpp::Node::SharedPtr srv_node = std::make_shared<rclcpp::Node>("srv_client");
+  srv_executor.add_node(srv_node);
+  rclcpp::Client<SwitchController>::SharedPtr client =
+    srv_node->create_client<SwitchController>("test_controller_manager/switch_controller");
+
+  auto chain = setup_chain_controllers(*cm_);
+
+  auto request = std::make_shared<SwitchController::Request>();
+  request->activate_controllers = {CHAIN_TIP_NAME};
+  request->strictness = SwitchController::Request::AUTO;
+
+  auto result = call_service_and_wait(*client, request, srv_executor);
+  EXPECT_TRUE(result->ok) << result->message;
+  EXPECT_EQ("active", controller_state(*cm_, CHAIN_TIP_NAME));
+  EXPECT_EQ("active", controller_state(*cm_, test_chainable_controller::TEST_CONTROLLER_NAME));
+  EXPECT_EQ("inactive", controller_state(*cm_, CHAIN_RIVAL_NAME));
+}
+
+// AUTO reports the conflict instead of stopping the controller that holds the interface, and the
+// failed request leaves every controller in its previous state.
+TEST_F(TestControllerManagerSrvs, switch_controller_srv_auto_rejects_conflict)
+{
+  rclcpp::executors::SingleThreadedExecutor srv_executor;
+  rclcpp::Node::SharedPtr srv_node = std::make_shared<rclcpp::Node>("srv_client");
+  srv_executor.add_node(srv_node);
+  rclcpp::Client<SwitchController>::SharedPtr client =
+    srv_node->create_client<SwitchController>("test_controller_manager/switch_controller");
+
+  auto chain = setup_chain_controllers(*cm_);
+  ASSERT_EQ(
+    controller_interface::return_type::OK,
+    cm_->switch_controller(
+      {CHAIN_RIVAL_NAME}, {}, SwitchController::Request::STRICT, true, rclcpp::Duration(0, 0)));
+  ASSERT_EQ("active", controller_state(*cm_, CHAIN_RIVAL_NAME));
+
+  auto request = std::make_shared<SwitchController::Request>();
+  request->activate_controllers = {CHAIN_TIP_NAME};
+  request->strictness = SwitchController::Request::AUTO;
+
+  auto result = call_service_and_wait(*client, request, srv_executor);
+  EXPECT_FALSE(result->ok);
+  EXPECT_THAT(result->message, ::testing::HasSubstr(CHAIN_RIVAL_NAME));
+  EXPECT_EQ("active", controller_state(*cm_, CHAIN_RIVAL_NAME));
+  EXPECT_EQ("inactive", controller_state(*cm_, CHAIN_TIP_NAME));
+  EXPECT_EQ("inactive", controller_state(*cm_, test_chainable_controller::TEST_CONTROLLER_NAME));
+}
+
+// The same request under FORCE_AUTO succeeds by stopping the conflicting controller, without the
+// caller naming it.
+TEST_F(TestControllerManagerSrvs, switch_controller_srv_force_auto_resolves_conflict)
+{
+  rclcpp::executors::SingleThreadedExecutor srv_executor;
+  rclcpp::Node::SharedPtr srv_node = std::make_shared<rclcpp::Node>("srv_client");
+  srv_executor.add_node(srv_node);
+  rclcpp::Client<SwitchController>::SharedPtr client =
+    srv_node->create_client<SwitchController>("test_controller_manager/switch_controller");
+
+  auto chain = setup_chain_controllers(*cm_);
+  ASSERT_EQ(
+    controller_interface::return_type::OK,
+    cm_->switch_controller(
+      {CHAIN_RIVAL_NAME}, {}, SwitchController::Request::STRICT, true, rclcpp::Duration(0, 0)));
+  ASSERT_EQ("active", controller_state(*cm_, CHAIN_RIVAL_NAME));
+
+  auto request = std::make_shared<SwitchController::Request>();
+  request->activate_controllers = {CHAIN_TIP_NAME};
+  request->strictness = SwitchController::Request::FORCE_AUTO;
+
+  auto result = call_service_and_wait(*client, request, srv_executor);
+  EXPECT_TRUE(result->ok) << result->message;
+  EXPECT_EQ("inactive", controller_state(*cm_, CHAIN_RIVAL_NAME));
+  EXPECT_EQ("active", controller_state(*cm_, CHAIN_TIP_NAME));
+  EXPECT_EQ("active", controller_state(*cm_, test_chainable_controller::TEST_CONTROLLER_NAME));
 }
 
 TEST_F(TestControllerManagerSrvs, switch_controller_failure_behaviour_on_unknown_controller)
