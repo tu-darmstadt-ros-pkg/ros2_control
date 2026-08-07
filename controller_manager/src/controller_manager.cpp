@@ -5070,6 +5070,8 @@ controller_interface::return_type ControllerManager::resolve_auto_switch_request
   // Controllers that are already running stay untouched unless the switch restarts them, which
   // happens when they have to enter or leave chained mode.
   std::vector<std::string> final_activate;
+  // Controllers the caller asked to stop that the activation set turns out to depend on.
+  std::vector<std::string> restarted_dependencies;
   for (const auto & name : activation_set)
   {
     auto ctrl_it = find_controller(controllers, name);
@@ -5077,14 +5079,31 @@ controller_interface::return_type ControllerManager::resolve_auto_switch_request
     {
       continue;
     }
-    if (
-      !is_controller_active(ctrl_it->c) ||
-      ros2_control::has_item(switch_params_.deactivate_request, name))
+    const bool was_active = is_controller_active(ctrl_it->c);
+    if (!was_active || ros2_control::has_item(switch_params_.deactivate_request, name))
     {
       final_activate.push_back(name);
     }
+    // A controller the caller listed in both requests is an explicit restart, not a surprise.
+    if (
+      was_active && ros2_control::has_item(requested_deactivate, name) &&
+      !ros2_control::has_item(requested_activate, name))
+    {
+      restarted_dependencies.push_back(name);
+    }
   }
   switch_params_.activate_request = final_activate;
+
+  if (!restarted_dependencies.empty())
+  {
+    RCLCPP_INFO(
+      get_logger(), "%s",
+      fmt::format(
+        "{}: controller(s) [{}] were requested to be deactivated but are needed by the activation "
+        "set. They are restarted instead of stopped.",
+        mode, fmt::join(restarted_dependencies, ", "))
+        .c_str());
+  }
 
   std::vector<std::string> added_activate, added_deactivate;
   for (const auto & name : switch_params_.activate_request)
