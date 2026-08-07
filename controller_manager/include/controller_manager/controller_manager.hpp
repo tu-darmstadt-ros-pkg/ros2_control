@@ -504,6 +504,61 @@ private:
    */
   void build_controllers_topology_info(const std::vector<ControllerSpec> & controllers);
 
+  /// Collect the transitive set of controllers required to run the requested ones.
+  /**
+   * Walks the command and state interfaces of every requested controller. An interface whose
+   * prefix names another controller is a chained interface, so that controller has to run as
+   * well; the walk repeats for it until no new controller is found.
+   *
+   * Only the provider direction is followed. A controller reading the exported state interfaces
+   * of a requested controller is an optional consumer and is never pulled in.
+   *
+   * \param[in] controllers list with controllers.
+   * \param[in] requested list with controllers the caller asked to activate.
+   *
+   * \returns the requested controllers followed by their dependencies.
+   */
+  std::vector<std::string> collect_activation_dependencies(
+    const std::vector<ControllerSpec> & controllers, const std::vector<std::string> & requested);
+
+  /// Add every active controller that depends on a stopping controller to the deactivate request.
+  /**
+   * Starting from the seed controllers, each reachable active controller is appended to
+   * switch_params_.deactivate_request. A controller depends on another when it commands its
+   * reference interfaces or reads its exported state interfaces; either way it cannot keep
+   * running once the provider stops. Controllers in the activation list are left alone, since
+   * they are being (re)started by the same switch.
+   *
+   * \param[in] controllers list with controllers.
+   * \param[in] seeds list with controllers known to be stopping, i.e. the controllers the caller
+   * asked to deactivate together with the ones blocking the activation.
+   * \param[in] activation_list list with controllers that have to survive the switch.
+   */
+  void propagate_forced_deactivation(
+    const std::vector<ControllerSpec> & controllers, const std::vector<std::string> & seeds,
+    const std::vector<std::string> & activation_list);
+
+  /// Rewrite the switch request for the "AUTO" and "FORCE_AUTO" strictness.
+  /**
+   * Expands switch_params_.activate_request with the chain dependencies of the requested
+   * controllers, then resolves resource conflicts with the controllers that are currently
+   * active. "AUTO" reports such a conflict as an error and leaves it to the caller to name the
+   * controllers to deactivate, whereas "FORCE_AUTO" deactivates the conflicting controllers and
+   * everything depending on them. Controllers that are already active and are not restarted by
+   * this switch are removed from the activate request.
+   *
+   * On success the request is expressed purely in "STRICT" terms and the regular switch checks
+   * take over from there.
+   *
+   * \param[in] controllers list with controllers.
+   * \param[in] is_force_auto true for "FORCE_AUTO", false for "AUTO".
+   * \param[out] message describing why the request was rejected.
+   *
+   * \returns return_type::OK if the request was expanded, otherwise return_type::ERROR.
+   */
+  controller_interface::return_type resolve_auto_switch_request(
+    const std::vector<ControllerSpec> & controllers, bool is_force_auto, std::string & message);
+
   /**
    * @brief Method to publish the state of the controller manager.
    * The state includes the list of controllers and the list of hardware interfaces along with
