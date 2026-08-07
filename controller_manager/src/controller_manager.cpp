@@ -96,6 +96,15 @@ bool controller_name_compare(const controller_manager::ControllerSpec & a, const
   return a.info.name == name;
 }
 
+/// Finds a controller by name, returning controllers.end() if no controller carries that name.
+controller_manager::ControllersListIterator find_controller(
+  const std::vector<controller_manager::ControllerSpec> & controllers, const std::string & name)
+{
+  return std::find_if(
+    controllers.begin(), controllers.end(),
+    std::bind(controller_name_compare, std::placeholders::_1, name));
+}
+
 /// Checks if an interface belongs to a controller based on its prefix.
 /**
  * A State/Command interface can be provided by a controller in which case is called
@@ -4884,9 +4893,7 @@ std::vector<std::string> ControllerManager::collect_activation_dependencies(
     }
     dependencies.push_back(ctrl);
 
-    auto ctrl_it = std::find_if(
-      controllers.begin(), controllers.end(),
-      std::bind(controller_name_compare, std::placeholders::_1, ctrl));
+    auto ctrl_it = find_controller(controllers, ctrl);
     // An unconfigured controller has no interface configuration to read yet. It stays in the
     // list so that the regular activation checks reject the switch with a proper message.
     if (ctrl_it == controllers.end() || is_controller_unconfigured(*ctrl_it->c))
@@ -4936,9 +4943,7 @@ void ControllerManager::propagate_forced_deactivation(
       continue;
     }
 
-    auto ctrl_it = std::find_if(
-      controllers.begin(), controllers.end(),
-      std::bind(controller_name_compare, std::placeholders::_1, ctrl));
+    auto ctrl_it = find_controller(controllers, ctrl);
     if (ctrl_it == controllers.end() || !is_controller_active(ctrl_it->c))
     {
       continue;
@@ -4988,9 +4993,7 @@ controller_interface::return_type ControllerManager::resolve_auto_switch_request
   // into a controller that cannot report its interface configuration yet.
   for (const auto & name : activation_set)
   {
-    auto ctrl_it = std::find_if(
-      controllers.begin(), controllers.end(),
-      std::bind(controller_name_compare, std::placeholders::_1, name));
+    auto ctrl_it = find_controller(controllers, name);
     if (ctrl_it != controllers.end() && is_controller_unconfigured(*ctrl_it->c))
     {
       message = fmt::format(
@@ -5007,9 +5010,7 @@ controller_interface::return_type ControllerManager::resolve_auto_switch_request
   std::set<std::string> needed_resources;
   for (const auto & name : activation_set)
   {
-    auto ctrl_it = std::find_if(
-      controllers.begin(), controllers.end(),
-      std::bind(controller_name_compare, std::placeholders::_1, name));
+    auto ctrl_it = find_controller(controllers, name);
     if (ctrl_it == controllers.end() || is_controller_unconfigured(*ctrl_it->c))
     {
       continue;
@@ -5071,9 +5072,7 @@ controller_interface::return_type ControllerManager::resolve_auto_switch_request
   std::vector<std::string> final_activate;
   for (const auto & name : activation_set)
   {
-    auto ctrl_it = std::find_if(
-      controllers.begin(), controllers.end(),
-      std::bind(controller_name_compare, std::placeholders::_1, name));
+    auto ctrl_it = find_controller(controllers, name);
     if (ctrl_it == controllers.end())
     {
       continue;
