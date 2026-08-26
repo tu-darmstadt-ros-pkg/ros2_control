@@ -180,10 +180,26 @@ void controller_chain_spec_cleanup(
  */
 std::vector<std::string> get_command_interfaces_names(
   controller_interface::ControllerInterfaceBaseSharedPtr controller,
-  const std::unique_ptr<hardware_interface::ResourceManager> & resource_manager)
+  const std::unique_ptr<hardware_interface::ResourceManager> & resource_manager,
+  bool include_unavailable = false)
 {
   auto command_interface_config = controller->command_interface_configuration();
   std::vector<std::string> command_interface_names = {};
+  // ALL, REGEX and INDIVIDUAL_BEST_EFFORT resolve against what is *available*, and a chainable
+  // controller exports its reference interfaces only while it is active. That is the right answer
+  // when the question is "what will this controller claim now", and the wrong one when the
+  // question is "what does this controller depend on" - the dependency exists whether or not the
+  // provider happens to be running yet. `include_unavailable` asks the second question, against
+  // every interface that exists; a configured chainable controller's references are imported at
+  // its configure, so they are present here while still unavailable.
+  //
+  // ALL is deliberately **not** widened. It does not name anything, so it expresses no dependency
+  // on any particular controller - upstream's own chain check says as much ("if preceding
+  // controller uses ALL ... there is no strict dependency on specific interface"). Widening it
+  // would make an ALL broadcaster appear to depend on every chainable controller that exists and
+  // refuse to activate until they all ran, which is what the first draft of this patch did.
+  const auto candidates = include_unavailable ? resource_manager->command_interface_keys()
+                                              : resource_manager->available_command_interfaces();
   if (command_interface_config.type == controller_interface::interface_configuration_type::ALL)
   {
     return resource_manager->available_command_interfaces();
@@ -197,7 +213,7 @@ std::vector<std::string> get_command_interfaces_names(
     command_interface_config.type ==
     controller_interface::interface_configuration_type::INDIVIDUAL_BEST_EFFORT)
   {
-    auto available_interfaces = resource_manager->available_command_interfaces();
+    const auto & available_interfaces = candidates;
     for (const auto & name : command_interface_config.names)
     {
       // Check if the requested interface exists in the available interfaces
@@ -211,7 +227,7 @@ std::vector<std::string> get_command_interfaces_names(
   else if (
     command_interface_config.type == controller_interface::interface_configuration_type::REGEX)
   {
-    auto available_interfaces = resource_manager->available_command_interfaces();
+    const auto & available_interfaces = candidates;
     for (const auto & pattern : command_interface_config.names)
     {
       std::regex regex_pattern(pattern);
@@ -234,10 +250,16 @@ std::vector<std::string> get_command_interfaces_names(
  */
 std::vector<std::string> get_state_interfaces_names(
   controller_interface::ControllerInterfaceBaseSharedPtr controller,
-  const std::unique_ptr<hardware_interface::ResourceManager> & resource_manager)
+  const std::unique_ptr<hardware_interface::ResourceManager> & resource_manager,
+  bool include_unavailable = false)
 {
   auto state_interface_config = controller->state_interface_configuration();
   std::vector<std::string> state_interface_names = {};
+  // See get_command_interfaces_names(): a chainable controller's exported state interfaces come
+  // and go with its activation the same way its references do.
+  // ALL is not widened here either - see get_command_interfaces_names().
+  const auto candidates = include_unavailable ? resource_manager->state_interface_keys()
+                                              : resource_manager->available_state_interfaces();
   if (state_interface_config.type == controller_interface::interface_configuration_type::ALL)
   {
     return resource_manager->available_state_interfaces();
@@ -251,7 +273,7 @@ std::vector<std::string> get_state_interfaces_names(
     state_interface_config.type ==
     controller_interface::interface_configuration_type::INDIVIDUAL_BEST_EFFORT)
   {
-    auto available_interfaces = resource_manager->available_state_interfaces();
+    const auto & available_interfaces = candidates;
     for (const auto & name : state_interface_config.names)
     {
       // Check if the requested interface exists in the available interfaces
@@ -264,7 +286,7 @@ std::vector<std::string> get_state_interfaces_names(
   }
   else if (state_interface_config.type == controller_interface::interface_configuration_type::REGEX)
   {
-    auto available_interfaces = resource_manager->available_state_interfaces();
+    const auto & available_interfaces = candidates;
     for (const auto & pattern : state_interface_config.names)
     {
       std::regex regex_pattern(pattern);
@@ -3864,10 +3886,15 @@ controller_interface::return_type ControllerManager::check_following_controllers
     get_logger(), "Checking following controllers of preceding controller with name '%s'.",
     controller_it->info.name.c_str());
 
+  // `include_unavailable`: this is the dependency question, not the claim question. A dynamic
+  // configuration naming a chainable controller's reference resolves to nothing while that
+  // provider is inactive, which is exactly the case this check exists to catch - without it a
+  // REGEX or BEST_EFFORT consumer looks like it depends on nothing, its provider is never put
+  // into chained mode, and the consumer's commands are silently discarded.
   const auto controller_cmd_interfaces =
-    get_command_interfaces_names(controller_it->c, resource_manager_);
+    get_command_interfaces_names(controller_it->c, resource_manager_, true);
   const auto controller_state_interfaces =
-    get_state_interfaces_names(controller_it->c, resource_manager_);
+    get_state_interfaces_names(controller_it->c, resource_manager_, true);
   // get all interfaces of the controller
   auto controller_interfaces = controller_cmd_interfaces;
   controller_interfaces.insert(
@@ -4885,8 +4912,15 @@ void ControllerManager::build_controllers_topology_info(
         controller.info.name.c_str());
       continue;
     }
-    const auto cmd_itfs = get_command_interfaces_names(controller.c, resource_manager_);
-    const auto state_itfs = get_state_interfaces_names(controller.c, resource_manager_);
+    // `include_unavailable`: the topology records what depends on what, and a dependency does not
+    // come and go with its provider's activation. Resolved against the available set instead, a
+    // dynamic configuration naming a chainable controller's export contributes no edge whenever
+    // that provider happens to be inactive at configure time - which is nearly always, since
+    // controllers are configured before anything is activated. The deactivate-side check reads
+    // these caches, so the missing edge is what lets a provider be stopped out from under a live
+    // consumer.
+    const auto cmd_itfs = get_command_interfaces_names(controller.c, resource_manager_, true);
+    const auto state_itfs = get_state_interfaces_names(controller.c, resource_manager_, true);
 
     for (const auto & cmd_itf : cmd_itfs)
     {

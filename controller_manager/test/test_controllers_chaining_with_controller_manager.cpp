@@ -2134,6 +2134,202 @@ TEST_P(TestControllerChainingWithControllerManager, test_chained_controllers_add
   UpdateAllControllerAndCheck(reference, 3u);
 }
 
+// A dynamic interface configuration - REGEX, ALL or INDIVIDUAL_BEST_EFFORT - resolves against the
+// interfaces that are *available*, and a chainable controller exports its reference interfaces only
+// while it is active. So a consumer whose pattern can only match a provider's reference resolved to
+// nothing at the moment the chain checks ran, and the manager concluded it depended on nobody: the
+// provider was never put into chained mode, and the consumer's commands went to a controller that
+// was still driving from its own source. `list_controllers` reported a correctly connected chain
+// throughout, which is what made it worth a regression test rather than a comment.
+//
+// The three below are the same defect reached through the three dynamic configurations, plus a
+// guard for the over-approximation the first fix for it introduced.
+TEST_P(
+  TestControllerChainingWithControllerManager,
+  regex_consumer_of_a_reference_interface_chains_its_provider)
+{
+  SetupControllers();
+
+  // A pattern that can only ever match diff_drive's exported references. At configure time
+  // diff_drive is inactive and exports nothing, so this matches nothing at all.
+  auto regex_consumer = std::make_shared<test_controller::TestController>();
+  regex_consumer->set_command_interface_configuration(
+    {controller_interface::interface_configuration_type::REGEX,
+     {std::string(DIFF_DRIVE_CONTROLLER) + "/.*"}});
+  regex_consumer->set_state_interface_configuration(
+    {controller_interface::interface_configuration_type::NONE, {}});
+
+  cm_->add_controller(
+    pid_left_wheel_controller, PID_LEFT_WHEEL,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    pid_right_wheel_controller, PID_RIGHT_WHEEL,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    diff_drive_controller, DIFF_DRIVE_CONTROLLER,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    regex_consumer, "regex_consumer", test_controller::TEST_CONTROLLER_CLASS_NAME);
+
+  cm_->configure_controller(PID_LEFT_WHEEL);
+  cm_->configure_controller(PID_RIGHT_WHEEL);
+  cm_->configure_controller(DIFF_DRIVE_CONTROLLER);
+  cm_->configure_controller("regex_consumer");
+
+  switch_test_controllers({PID_LEFT_WHEEL, PID_RIGHT_WHEEL}, {}, test_param.strictness);
+  // Named in one request, which is the only route into chained mode for the provider.
+  switch_test_controllers({"regex_consumer", DIFF_DRIVE_CONTROLLER}, {}, test_param.strictness);
+
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    diff_drive_controller->get_lifecycle_state().id());
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE, regex_consumer->get_lifecycle_state().id());
+  EXPECT_TRUE(diff_drive_controller->is_in_chained_mode())
+    << "the provider of a REGEX consumer must enter chained mode, exactly as it does for an "
+       "INDIVIDUAL one - otherwise it keeps driving from its own source and the consumer's "
+       "commands are silently discarded";
+
+  // And it is a real dependency, so the provider may not be taken away on its own.
+  switch_test_controllers(
+    {}, {DIFF_DRIVE_CONTROLLER}, strict.strictness, std::future_status::ready,
+    controller_interface::return_type::ERROR);
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    diff_drive_controller->get_lifecycle_state().id());
+}
+
+TEST_P(
+  TestControllerChainingWithControllerManager,
+  best_effort_consumer_of_a_reference_interface_chains_its_provider)
+{
+  SetupControllers();
+
+  // INDIVIDUAL_BEST_EFFORT names the interface outright but drops it when it is not available -
+  // which, at configure time, it is not.
+  auto best_effort_consumer = std::make_shared<test_controller::TestController>();
+  best_effort_consumer->set_command_interface_configuration(
+    {controller_interface::interface_configuration_type::INDIVIDUAL_BEST_EFFORT,
+     {std::string(DIFF_DRIVE_CONTROLLER) + "/vel_x"}});
+  best_effort_consumer->set_state_interface_configuration(
+    {controller_interface::interface_configuration_type::NONE, {}});
+
+  cm_->add_controller(
+    pid_left_wheel_controller, PID_LEFT_WHEEL,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    pid_right_wheel_controller, PID_RIGHT_WHEEL,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    diff_drive_controller, DIFF_DRIVE_CONTROLLER,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    best_effort_consumer, "best_effort_consumer", test_controller::TEST_CONTROLLER_CLASS_NAME);
+
+  cm_->configure_controller(PID_LEFT_WHEEL);
+  cm_->configure_controller(PID_RIGHT_WHEEL);
+  cm_->configure_controller(DIFF_DRIVE_CONTROLLER);
+  cm_->configure_controller("best_effort_consumer");
+
+  switch_test_controllers({PID_LEFT_WHEEL, PID_RIGHT_WHEEL}, {}, test_param.strictness);
+  switch_test_controllers(
+    {"best_effort_consumer", DIFF_DRIVE_CONTROLLER}, {}, test_param.strictness);
+
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    diff_drive_controller->get_lifecycle_state().id());
+  EXPECT_TRUE(diff_drive_controller->is_in_chained_mode())
+    << "the provider of an INDIVIDUAL_BEST_EFFORT consumer must enter chained mode";
+}
+
+TEST_P(
+  TestControllerChainingWithControllerManager,
+  regex_consumer_of_an_exported_state_interface_blocks_its_provider)
+{
+  SetupControllers();
+
+  // The exported-state half. A state consumer deliberately does *not* chain its provider
+  // (controller_chaining.rst), so the only thing the edge buys is the refusal below - which makes
+  // this the quieter failure of the two: without it everything looks healthy until somebody stops
+  // the provider.
+  auto regex_state_reader = std::make_shared<test_controller::TestController>();
+  regex_state_reader->set_command_interface_configuration(
+    {controller_interface::interface_configuration_type::NONE, {}});
+  regex_state_reader->set_state_interface_configuration(
+    {controller_interface::interface_configuration_type::REGEX,
+     {std::string(DIFF_DRIVE_CONTROLLER) + "/odom.*"}});
+
+  cm_->add_controller(
+    pid_left_wheel_controller, PID_LEFT_WHEEL,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    pid_right_wheel_controller, PID_RIGHT_WHEEL,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    diff_drive_controller, DIFF_DRIVE_CONTROLLER,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    regex_state_reader, "regex_state_reader", test_controller::TEST_CONTROLLER_CLASS_NAME);
+
+  cm_->configure_controller(PID_LEFT_WHEEL);
+  cm_->configure_controller(PID_RIGHT_WHEEL);
+  cm_->configure_controller(DIFF_DRIVE_CONTROLLER);
+  cm_->configure_controller("regex_state_reader");
+
+  switch_test_controllers({PID_LEFT_WHEEL, PID_RIGHT_WHEEL}, {}, test_param.strictness);
+  switch_test_controllers({"regex_state_reader", DIFF_DRIVE_CONTROLLER}, {}, test_param.strictness);
+
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    diff_drive_controller->get_lifecycle_state().id());
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    regex_state_reader->get_lifecycle_state().id());
+  EXPECT_FALSE(diff_drive_controller->is_in_chained_mode())
+    << "a state consumer does not put its provider into chained mode";
+
+  switch_test_controllers(
+    {}, {DIFF_DRIVE_CONTROLLER}, strict.strictness, std::future_status::ready,
+    controller_interface::return_type::ERROR);
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    diff_drive_controller->get_lifecycle_state().id());
+}
+
+// The guard for the over-approximation. ALL names nothing, so it expresses no dependency on any
+// particular controller and must NOT be widened the way REGEX and BEST_EFFORT are: an ALL
+// broadcaster that appeared to depend on every chainable controller in the system would refuse to
+// activate until all of them were running. The first version of this fix did exactly that, and
+// this test is what caught it.
+TEST_P(
+  TestControllerChainingWithControllerManager,
+  all_configuration_does_not_depend_on_inactive_chainable_controllers)
+{
+  SetupControllers();
+
+  cm_->add_controller(
+    pid_left_wheel_controller, PID_LEFT_WHEEL,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    diff_drive_controller, DIFF_DRIVE_CONTROLLER,
+    test_chainable_controller::TEST_CONTROLLER_CLASS_NAME);
+  cm_->add_controller(
+    all_state_broadcaster, ALL_STATE_BROADCASTER, test_controller::TEST_CONTROLLER_CLASS_NAME);
+
+  cm_->configure_controller(PID_LEFT_WHEEL);
+  cm_->configure_controller(DIFF_DRIVE_CONTROLLER);
+  cm_->configure_controller(ALL_STATE_BROADCASTER);
+
+  // diff_drive stays inactive throughout: the broadcaster must not be held hostage by it.
+  switch_test_controllers({ALL_STATE_BROADCASTER}, {}, test_param.strictness);
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+    all_state_broadcaster->get_lifecycle_state().id());
+  EXPECT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    diff_drive_controller->get_lifecycle_state().id());
+}
+
 INSTANTIATE_TEST_SUITE_P(
   test_strict_best_effort, TestControllerChainingWithControllerManager,
   testing::Values(strict, best_effort));
